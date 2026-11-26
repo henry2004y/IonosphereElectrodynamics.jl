@@ -1,0 +1,16 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  julia:
+    uses: henry2004y/LingXiaoDotGithub/.github/workflows/CI-julia.yml@main
+    with:
+      julia-versions: '["1.11", "1"]'
+      os-list: '["ubuntu-latest"]'
+      run-runic: true
+      registry-url: 'https://github.com/henry2004y/LingXiaoRegistry.git'

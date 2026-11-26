@@ -1,0 +1,7 @@
+Manifest.toml
+LocalPreferences.toml
+*.cov
+*.mem
+*.jl.*.cov
+docs/build/
+docs/node_modules/
