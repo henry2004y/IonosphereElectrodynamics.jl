@@ -7,15 +7,9 @@ field-aligned current extraction shell at $r_{\text{fac}} \ge r_{\text{ib}} \ge 
 
 1. **Extract FACs on the ionosphere grid**: For each active `(i, j)` node on `sol.theta`
    and `sol.phi`, call [`dipole_fac_sample_point`](@ref) to trace along the dipole field
-   line from $R_I$ to $r_{\text{fac}}$:
-   ```julia
-   valid, x_fac, _, _, b_iono_mag, br_over_b_iono = dipole_fac_sample_point(
-       sol.frame, sol.theta[i], sol.phi[j], r_fac,
-   )
-   ```
-   Sample $\mathbf{J}_\parallel = (\mathbf{J} \cdot \hat{\mathbf{b}})$ from the 3D
-   magnetospheric state at `x_fac`, and project to the ionospheric shell using flux
-   conservation:
+   line from $R_I$ to $r_{\text{fac}}$, sample $\mathbf{J}_\parallel = \mathbf{J} \cdot \hat{\mathbf{b}}$
+   from the 3D magnetospheric state at `x_fac`, and project to the ionospheric shell using
+   flux conservation:
    ```math
    J_r^{\text{outward}} = J_\parallel \frac{|\mathbf{B}_{0,\text{iono}}|}{|\mathbf{B}_{\text{tot}}(\mathbf{x}_{\text{fac}})|}
    \frac{\mathbf{B}_{0,\text{iono}} \cdot \hat{\mathbf{r}}_{\text{iono}}}{|\mathbf{B}_{0,\text{iono}}|}.
@@ -28,6 +22,28 @@ field-aligned current extraction shell at $r_{\text{fac}} \ge r_{\text{ib}} \ge 
    [`eval_ionosphere_E`](@ref) and [`eval_ionosphere_u_exb`](@ref) inside inner-boundary
    or guard-cell kernels.
 
+````@example fac_mapping_demo
+using IonosphereElectrodynamics
+
+frame = build_dipole_frame((0.0, 0.0, -3.0e-5); r_iono = 1.017)
+r_fac = 2.5
+
+for th_deg in (15.0, 25.0, 65.0)
+    valid, x_fac, _, _, b_iono, br_over_b = dipole_fac_sample_point(
+        frame, deg2rad(th_deg), deg2rad(90.0), r_fac,
+    )
+    if valid
+        println(
+            "θ = ", th_deg, "° -> x_fac = ", round.(x_fac; sigdigits = 4),
+            ", |B0_iono| = ", round(b_iono; sigdigits = 4),
+            ", Br/B = ", round(br_over_b; sigdigits = 4),
+        )
+    else
+        println("θ = ", th_deg, "° -> closed below r_fac = ", r_fac)
+    end
+end
+````
+
 ## GPU / `Adapt.jl` & `Float32` Support
 
 [`IonosphereFieldView`](@ref) implements `Adapt.adapt_structure`, allowing a host solver's
@@ -36,8 +52,9 @@ gradient arrays to be transferred cleanly to GPU device memory (e.g., CUDA/AMDGP
 scalar metadata `isbits`. Both `eval_ionosphere_E` and `eval_ionosphere_u_exb` are `@inline`,
 type-stable, and allocation-free for `Float64` and `Float32`:
 
-```jldoctest
-using IonosphereElectrodynamics, StaticArrays
+````@example float32_demo
+using IonosphereElectrodynamics
+using StaticArrays
 
 cfg32 = IonosphereConfig(;
     n_theta_hem = 17,
@@ -49,16 +66,18 @@ sol32 = IonosphereSolver(cfg32; r_iono = 1.0f0, dipole_moment = (0.0f0, 0.0f0, -
 jr32 = [1.0f-6 * sin(sol32.theta[i])^2 * sin(sol32.phi[j]) for i in 1:sol32.n_theta, j in 1:sol32.n_phi]
 
 ok = solve_ionosphere!(sol32, jr32)
+cpcp32 = cross_polar_cap_potential(sol32)
 view32 = ionosphere_field_view(sol32)
 x32 = SVector(0.5f0, 0.4f0, 1.5f0)
 b32 = dipole_B0(sol32.frame, x32)
 e32 = eval_ionosphere_E(view32, x32; B0 = b32)
+u32 = eval_ionosphere_u_exb(view32, x32, b32)
 
-ok && e32 isa SVector{3, Float32}
-
-# output
-true
-```
+println("ok    = ", ok)
+println("cpcp  = (north = ", round(cpcp32.north; sigdigits = 4), ", south = ", round(cpcp32.south; sigdigits = 4), ")")
+println("e32   = ", round.(e32; sigdigits = 4), " (", typeof(e32), ")")
+println("u32   = ", round.(u32; sigdigits = 4), " (", typeof(u32), ")")
+````
 
 ## Analytic R1 + R2 Polar Benchmark
 
