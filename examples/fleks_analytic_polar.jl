@@ -11,11 +11,11 @@
 #   - Left:   18 MLT (Dusk, +y, Φ < 0, upward R1 FAC)
 #
 # Usage:
-#   julia --project=<env-with-CairoMakie-and-Ionosphere> \
+#   julia --project=<env-with-CairoMakie-and-IonosphereElectrodynamics> \
 #       examples/fleks_analytic_polar.jl [output_path.png]
 
 using CairoMakie
-using Ionosphere
+using IonosphereElectrodynamics
 using Printf
 using StaticArrays
 
@@ -170,7 +170,7 @@ function run_fleks_analytic_polar(;
         text!(ax, 1.05, 0.0; text = "06 MLT\n(Dawn)", align = (:left, :center), fontsize = 12)
         text!(ax, -1.05, 0.0; text = "18 MLT\n(Dusk)", align = (:right, :center), fontsize = 12)
         xlims!(ax, -1.45, 1.45)
-        ylims!(ax, -1.30, 1.30)
+        ylims!(ax, -1.3, 1.3)
         hidedecorations!(ax)
         return hidespines!(ax)
     end
@@ -178,7 +178,7 @@ function run_fleks_analytic_polar(;
     fig = Figure(; size = (1650, 1020), fontsize = 14)
     Label(
         fig[0, 1:6],
-        "Ionosphere.jl: Analytic R1+R2 FACs + Auroral/EUV Conductance (FLEKS Benchmark)";
+        "IonosphereElectrodynamics.jl: Analytic R1+R2 FACs + Auroral/EUV Conductance (FLEKS Benchmark)";
         fontsize = 18, font = :bold,
     )
 
@@ -229,4 +229,6 @@ function run_fleks_analytic_polar(;
     return outpath
 end
 
-run_fleks_analytic_polar()
+if abspath(PROGRAM_FILE) == @__FILE__
+    run_fleks_analytic_polar()
+end

@@ -47,8 +47,6 @@ jobs:
         with:
           version: ${{ matrix.version }}
       - uses: julia-actions/cache@v3
-      - name: Add LingXiaoRegistry
-        run: julia -e 'using Pkg; Pkg.Registry.add(RegistrySpec(url = "https://github.com/henry2004y/LingXiaoRegistry.git"))'
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
         env:

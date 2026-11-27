@@ -1,0 +1,18 @@
+[deps]
+CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+DocumenterVitepress = "4710194d-e776-4893-9690-8d956a29c365"
+IonosphereElectrodynamics = "8a2b5c6d-3e4f-4a9b-8c5d-6e7f8a9b0c1d"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+
+[sources]
+IonosphereElectrodynamics = {path = ".."}
+
+[compat]
+CairoMakie = "0.15"
+Documenter = "1"
+DocumenterVitepress = "0.3"
+StaticArrays = "1"
+julia = "1.11"
+

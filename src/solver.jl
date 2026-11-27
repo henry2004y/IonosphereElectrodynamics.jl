@@ -38,8 +38,9 @@ const _VALID_PARTICLE_BC = (:ionosphere, :absorbing)
         FT = Float64,
     )
 
-Unified configuration for 2D spherical magnetosphere–ionosphere (M–I) coupling across
-`LingXiaoLBM`, `LingXiaoBoltz`, and `LingXiaoBoltzX`.
+Configuration for the 2D spherical magnetosphere–ionosphere (M–I) electrostatic
+coupling solver, including optional geometry and boundary metadata for coupling to
+3D magnetospheric host simulations.
 """
 struct IonosphereConfig{FT <: AbstractFloat, C <: AbstractConductanceModel}
     r_iono::Union{Nothing, FT}
@@ -762,8 +763,10 @@ function IonosphereSolver(
         FT::Type{<:AbstractFloat} = FT_cfg,
     ) where {FT_cfg <: AbstractFloat, C <: AbstractConductanceModel}
     r_io = r_iono !== nothing ? FT(r_iono) :
-        (cfg.r_iono !== nothing ? FT(cfg.r_iono) :
-        (cfg.r_ib !== nothing ? FT(0.5) * FT(cfg.r_ib) : one(FT)))
+        (
+            cfg.r_iono !== nothing ? FT(cfg.r_iono) :
+            (cfg.r_ib !== nothing ? FT(0.5) * FT(cfg.r_ib) : one(FT))
+        )
     mom = dipole_moment !== nothing ? dipole_moment :
         (cfg.dipole_moment !== nothing ? cfg.dipole_moment : SVector{3, FT}(zero(FT), zero(FT), -one(FT)))
     ctr = center !== nothing ? center : cfg.center
@@ -1082,8 +1085,8 @@ end
             term_th2 = stt * sn2 * inv_dth2
             term_th1 = (
                 stt * sn * cs +
-                dtt_dth[i, j] * sn2 -
-                dtp_dph[i, j] * sn
+                    dtt_dth[i, j] * sn2 -
+                    dtp_dph[i, j] * sn
             ) * inv_2dth
             term_ph2 = spp * inv_dph2
             term_ph1 = (dtp_dth[i, j] * sn + dpp_dph[i, j]) * inv_2dph

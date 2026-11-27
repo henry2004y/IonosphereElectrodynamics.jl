@@ -1,5 +1,5 @@
 """
-    Ionosphere
+    IonosphereElectrodynamics
 
 Standalone, zero-allocation 2D spherical magnetosphere–ionosphere (M–I) coupling solver.
 Solves the height-integrated ionospheric potential equation
@@ -7,7 +7,7 @@ Solves the height-integrated ionospheric potential equation
 on both hemispheres in dipole SMG coordinates and maps potentials, electric fields, and
 ``\\mathbf{E}\\times\\mathbf{B}_0`` convection velocities along dipole field lines.
 """
-module Ionosphere
+module IonosphereElectrodynamics
 
 using Adapt: Adapt
 using LinearAlgebra: cross, dot, norm
@@ -67,4 +67,4 @@ export AbstractConductanceModel,
     end
 end
 
-end # module Ionosphere
+end # module IonosphereElectrodynamics

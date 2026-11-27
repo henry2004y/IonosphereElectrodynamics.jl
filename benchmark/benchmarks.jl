@@ -1,5 +1,5 @@
 using BenchmarkTools
-using Ionosphere
+using IonosphereElectrodynamics
 using StaticArrays
 
 const SUITE = BenchmarkGroup()

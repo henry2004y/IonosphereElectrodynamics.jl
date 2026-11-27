@@ -1,7 +1,9 @@
-# Ionosphere.jl
+# IonosphereElectrodynamics.jl
 
-[![CI](https://github.com/henry2004y/Ionosphere.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/henry2004y/Ionosphere.jl/actions/workflows/CI.yml?query=branch%3Amain)
-[![Coverage](https://codecov.io/gh/henry2004y/Ionosphere.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/henry2004y/Ionosphere.jl)
+[![Stable](https://img.shields.io/badge/docs-stable-blue.svg)](https://henry2004y.github.io/IonosphereElectrodynamics.jl/stable)
+[![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://henry2004y.github.io/IonosphereElectrodynamics.jl/dev)
+[![CI](https://github.com/henry2004y/IonosphereElectrodynamics.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/henry2004y/IonosphereElectrodynamics.jl/actions/workflows/CI.yml?query=branch%3Amain)
+[![Coverage](https://codecov.io/gh/henry2004y/IonosphereElectrodynamics.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/henry2004y/IonosphereElectrodynamics.jl)
 [![Aqua QA](https://raw.githubusercontent.com/JuliaTesting/Aqua.jl/master/badge.svg)](https://github.com/JuliaTesting/Aqua.jl)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -22,24 +24,22 @@ using a 5-point spherical finite-difference stencil and pre-allocated ILU(0)-pre
 
 ## Installation
 
-`Ionosphere.jl` is registered in [LingXiaoRegistry](https://github.com/henry2004y/LingXiaoRegistry). You can install it directly from GitHub or a local checkout:
-
 ```julia
 using Pkg
-Pkg.add(url = "https://github.com/henry2004y/Ionosphere.jl.git")
+Pkg.add("IonosphereElectrodynamics")
 ```
 
 Or for local development:
 
 ```julia
 using Pkg
-Pkg.develop(path = "/path/to/Ionosphere.jl")
+Pkg.develop(path = "/path/to/IonosphereElectrodynamics.jl")
 ```
 
 ## Quick Start
 
 ```julia
-using Ionosphere
+using IonosphereElectrodynamics
 using StaticArrays
 
 # 1. Configure Moen-Brekke solar EUV + auroral conductance on a 2D spherical grid
@@ -103,18 +103,17 @@ julia --project=/path/to/env-with-CairoMakie examples/fleks_analytic_polar.jl
 
 ## Testing & Benchmarking
 
-The test target uses `LingXiaoTest` from [LingXiaoRegistry](https://github.com/henry2004y/LingXiaoRegistry). Ensure the registry is added once before running tests:
+Run the unit, convergence, and `Aqua.jl` / `ExplicitImports.jl` quality test suite:
 
 ```bash
-julia -e 'using Pkg; Pkg.Registry.add(RegistrySpec(url = "https://github.com/henry2004y/LingXiaoRegistry.git"))'
-julia --project=Ionosphere.jl -e 'using Pkg; Pkg.test()'
+julia --project=IonosphereElectrodynamics.jl -e 'using Pkg; Pkg.test()'
 ```
 
 Benchmarks are defined in [`benchmark/benchmarks.jl`](benchmark/benchmarks.jl) using `BenchmarkTools.jl` and tracked across revisions with [`AirspeedVelocity.jl`](https://github.com/MilesCranmer/AirspeedVelocity.jl):
 
 ```bash
 # Compare the current working tree against main using the AirspeedVelocity CLI
-cd Ionosphere.jl && benchpkg Ionosphere --rev=main,dirty
+cd IonosphereElectrodynamics.jl && benchpkg IonosphereElectrodynamics --rev=main,dirty
 ```
 
 Or from Julia:
@@ -122,9 +121,9 @@ Or from Julia:
 ```julia
 using AirspeedVelocity
 
-AirspeedVelocity.benchmark("Ionosphere", ["main", "dirty"]; path = "/path/to/Ionosphere.jl")
+AirspeedVelocity.benchmark("IonosphereElectrodynamics", ["main", "dirty"]; path = "/path/to/IonosphereElectrodynamics.jl")
 ```
 
 ## License
 
-`Ionosphere.jl` is licensed under the [MIT License](LICENSE).
+`IonosphereElectrodynamics.jl` is licensed under the [MIT License](LICENSE).

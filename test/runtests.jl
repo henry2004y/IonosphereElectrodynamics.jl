@@ -1,22 +1,28 @@
 using Aqua: Aqua
+using ExplicitImports: check_no_implicit_imports, check_no_stale_explicit_imports
 using LinearAlgebra: dot, norm
-using Ionosphere
-using LingXiaoTest: run_hygiene_checks, verify_api_coverage
+using IonosphereElectrodynamics
 using StaticArrays: SMatrix, SVector
 using Test
 
-@testset "Ionosphere.jl" begin
+@testset "IonosphereElectrodynamics.jl" begin
     @testset "Package Hygiene, Aqua.jl & API Docstrings" begin
         Aqua.test_all(
-            Ionosphere;
+            IonosphereElectrodynamics;
             ambiguities = true,
             piracies = true,
             stale_deps = true,
-            deps_compat = (check_extras = false,),
+            deps_compat = (check_extras = (ignore = [:Test],),),
         )
-        run_hygiene_checks(Ionosphere; ambiguities = true)
-        cov = verify_api_coverage(Ionosphere, pkgdir(Ionosphere))
-        @test isempty(cov.missing_docstrings)
+        @test check_no_implicit_imports(IonosphereElectrodynamics; skip = (Base, Core)) === nothing
+        @test check_no_stale_explicit_imports(IonosphereElectrodynamics) === nothing
+        docs_meta = Base.Docs.meta(IonosphereElectrodynamics)
+        missing_docstrings = [
+            s for s in names(IonosphereElectrodynamics) if
+                s !== :IonosphereElectrodynamics &&
+                !haskey(docs_meta, Base.Docs.Binding(IonosphereElectrodynamics, s))
+        ]
+        @test isempty(missing_docstrings)
     end
 
     @testset "Validation & Conductance Models" begin
@@ -68,7 +74,7 @@ using Test
         for j in 1:sol.n_phi, i in 1:sol.n_theta
             sol.phi_pot[i, j] = 5.0e4 * sin(sol.theta[i])^2 * sin(sol.phi[j])
         end
-        Ionosphere._compute_gradients!(sol)
+        IonosphereElectrodynamics._compute_gradients!(sol)
 
         view = ionosphere_field_view(sol)
         r_body = 3.0
@@ -107,7 +113,7 @@ using Test
         for j in 1:sol.n_phi, i in 1:sol.n_theta
             sol.phi_pot[i, j] = 1.0e4 * sin(sol.theta[i]) * sin(sol.phi[j])
         end
-        Ionosphere._compute_gradients!(sol)
+        IonosphereElectrodynamics._compute_gradients!(sol)
         x_pole_N = ctr + r_body * (transpose(sol.frame.rot) * SVector(0.0, 0.0, 1.0))
         e_pole = eval_ionosphere_E(sol, x_pole_N)
         b_pole = dipole_B0(sol.frame, x_pole_N)
@@ -548,5 +554,34 @@ using Test
             cp_e = @inferred cross_polar_cap_potential(sol_e)
             @test isapprox(cp_e.north, cp_e.south; rtol = 1.0e-6)
         end
+    end
+
+    @testset "Reset & Diagnostics Output" begin
+        cfg = IonosphereConfig(; n_theta_hem = 9, n_phi = 16)
+        sol = IonosphereSolver(cfg; r_iono = 1.0, dipole_moment = (0.0, 0.0, -5.0))
+        jr = [1.0e-6 * sin(sol.theta[i]) * sin(sol.phi[j]) for i in 1:sol.n_theta, j in 1:sol.n_phi]
+        @test solve_ionosphere!(sol, jr)
+        @test sol.has_prev_solution
+
+        mktempdir() do dir
+            diag_path = joinpath(dir, "iono_diag.dat")
+            ret = write_ionosphere_diagnostics(diag_path, sol; time = 1.5, cycle = 3)
+            @test ret == diag_path
+            @test isfile(diag_path)
+            lines = readlines(diag_path)
+            @test startswith(lines[1], "# Ionosphere Diagnostics")
+            @test occursin("cycle = 3", lines[2])
+            @test length(lines) == 4 + sol.n_theta * sol.n_phi
+        end
+
+        @test reset_ionosphere!(sol) === nothing
+        @test !sol.has_prev_solution
+        @test iszero(sol.jr_outward)
+        @test iszero(sol.phi_solved)
+        @test iszero(sol.phi_pot)
+        @test sol.cpcp_north == 0.0
+        @test sol.cpcp_south == 0.0
+        @test sol.last_iters_north == 0
+        @test sol.last_iters_south == 0
     end
 end

@@ -1,7 +1,15 @@
 Manifest.toml
+test/Manifest.toml
+benchmark/Manifest.toml
+docs/Manifest.toml
 LocalPreferences.toml
 *.cov
 *.mem
 *.jl.*.cov
+lcov.info
 docs/build/
 docs/node_modules/
+docs/package.json
+docs/package-lock.json
+docs/src/.vitepress/
+docs/src/assets/fleks_analytic_polar.png
