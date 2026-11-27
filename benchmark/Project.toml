@@ -1,0 +1,13 @@
+[deps]
+BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
+Ionosphere = "8a2b5c6d-3e4f-4a9b-8c5d-6e7f8a9b0c1d"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+
+[sources]
+Ionosphere = {path = ".."}
+
+[compat]
+BenchmarkTools = "1"
+Ionosphere = "0.1"
+StaticArrays = "1"
+julia = "1.11"

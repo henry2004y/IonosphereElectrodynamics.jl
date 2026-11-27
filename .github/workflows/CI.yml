@@ -2,15 +2,62 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+    tags: ['*']
+    paths-ignore:
+      - 'README.md'
+      - 'docs/**'
+      - 'examples/**'
   pull_request:
-    branches: [main]
+    branches:
+      - main
+    paths-ignore:
+      - 'README.md'
+      - 'docs/**'
+      - 'examples/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  julia:
-    uses: henry2004y/LingXiaoDotGithub/.github/workflows/CI-julia.yml@main
-    with:
-      julia-versions: '["1.11", "1"]'
-      os-list: '["ubuntu-latest"]'
-      run-runic: true
-      registry-url: 'https://github.com/henry2004y/LingXiaoRegistry.git'
+  test:
+    name: Julia ${{ matrix.version }} - ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        version:
+          - '1.11'
+          - '1'
+        os:
+          - ubuntu-latest
+          - macOS-latest
+          - windows-latest
+        exclude:
+          - version: '1.11'
+            os: macOS-latest
+          - version: '1.11'
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: ${{ matrix.version }}
+      - uses: julia-actions/cache@v3
+      - name: Add LingXiaoRegistry
+        run: julia -e 'using Pkg; Pkg.Registry.add(RegistrySpec(url = "https://github.com/henry2004y/LingXiaoRegistry.git"))'
+      - uses: julia-actions/julia-buildpkg@v1
+      - uses: julia-actions/julia-runtest@v1
+        env:
+          JULIA_NUM_THREADS: 2
+      - uses: julia-actions/julia-processcoverage@v1
+        if: matrix.os == 'ubuntu-latest' && matrix.version == '1'
+      - uses: codecov/codecov-action@v5
+        if: matrix.os == 'ubuntu-latest' && matrix.version == '1'
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
