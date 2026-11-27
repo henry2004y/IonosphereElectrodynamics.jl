@@ -5,6 +5,21 @@ using IonosphereElectrodynamics
 using StaticArrays: SMatrix, SVector
 using Test
 
+function _alloc_eval_E(v, x, b)
+    eval_ionosphere_E(v, x; B0 = b)
+    return @allocated eval_ionosphere_E(v, x; B0 = b)
+end
+
+function _alloc_eval_u_exb(v, x, b)
+    eval_ionosphere_u_exb(v, x, b)
+    return @allocated eval_ionosphere_u_exb(v, x, b)
+end
+
+function _alloc_mobility_tensor(sp, sh, b_hat, s0)
+    electron_mobility_tensor(sp, sh, b_hat; sigma_0 = s0)
+    return @allocated electron_mobility_tensor(sp, sh, b_hat; sigma_0 = s0)
+end
+
 @testset "IonosphereElectrodynamics.jl" begin
     @testset "Package Hygiene, Aqua.jl & API Docstrings" begin
         Aqua.test_all(
@@ -321,8 +336,8 @@ using Test
         b_a = dipole_B0(sol_a.frame, x_a)
         eval_ionosphere_E(v_a, x_a; B0 = b_a)
         eval_ionosphere_u_exb(v_a, x_a, b_a)
-        @test (@allocated eval_ionosphere_E(v_a, x_a; B0 = b_a)) == 0
-        @test (@allocated eval_ionosphere_u_exb(v_a, x_a, b_a)) == 0
+        @test _alloc_eval_E(v_a, x_a, b_a) == 0
+        @test _alloc_eval_u_exb(v_a, x_a, b_a) == 0
     end
 
     @testset "End-to-End 3D B1 -> J_parallel(r_fac) -> Phi -> (E, u_ExB) Mapping" begin
@@ -472,7 +487,7 @@ using Test
             0.0, 0.0, 5.0,
         )
         @test M * b_z ≈ 5.0 * b_z
-        @test (@allocated electron_mobility_tensor(2.0, 3.0, b_z; sigma_0 = 5.0)) == 0
+        @test _alloc_mobility_tensor(2.0, 3.0, b_z, 5.0) == 0
     end
 
     @testset "Type Stability (@inferred), Float32, Wavefront Edge Grids & 0 B Allocs" begin
@@ -516,8 +531,8 @@ using Test
         b32 = @inferred dipole_B0(sol32.frame, x32)
         @test (@inferred eval_ionosphere_E(vf32, x32; B0 = b32)) isa SVector{3, Float32}
         @test (@inferred eval_ionosphere_u_exb(vf32, x32, b32)) isa SVector{3, Float32}
-        @test (@allocated eval_ionosphere_E(vf32, x32; B0 = b32)) == 0
-        @test (@allocated eval_ionosphere_u_exb(vf32, x32, b32)) == 0
+        @test _alloc_eval_E(vf32, x32, b32) == 0
+        @test _alloc_eval_u_exb(vf32, x32, b32) == 0
 
         # Additional 0 B steady-state solve paths (Dirichlet + smooth + relax, Neumann)
         for (bc, nsm, rlx) in ((:dirichlet, 2, 0.5), (:neumann, 1, 0.8))
