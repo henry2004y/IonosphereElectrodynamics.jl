@@ -1,3 +1,4 @@
+using Aqua: Aqua
 using LinearAlgebra: dot, norm
 using Ionosphere
 using LingXiaoTest: run_hygiene_checks, verify_api_coverage
@@ -5,8 +6,15 @@ using StaticArrays: SMatrix, SVector
 using Test
 
 @testset "Ionosphere.jl" begin
-    @testset "Package Hygiene & API Docstrings" begin
-        run_hygiene_checks(Ionosphere)
+    @testset "Package Hygiene, Aqua.jl & API Docstrings" begin
+        Aqua.test_all(
+            Ionosphere;
+            ambiguities = true,
+            piracies = true,
+            stale_deps = true,
+            deps_compat = (check_extras = false,),
+        )
+        run_hygiene_checks(Ionosphere; ambiguities = true)
         cov = verify_api_coverage(Ionosphere, pkgdir(Ionosphere))
         @test isempty(cov.missing_docstrings)
     end
@@ -459,5 +467,86 @@ using Test
         )
         @test M * b_z ≈ 5.0 * b_z
         @test (@allocated electron_mobility_tensor(2.0, 3.0, b_z; sigma_0 = 5.0)) == 0
+    end
+
+    @testset "Type Stability (@inferred), Float32, Wavefront Edge Grids & 0 B Allocs" begin
+        m_unif = UniformConductance(5.0, 2.0)
+        m_euv = SolarEUVConductance()
+        m_mb = MoenBrekkeEUVConductance()
+        m_aur = AuroralConductance(m_mb)
+        m_cust = CustomConductance((th, ph, t) -> (5.0, 1.0))
+        r_hat = SVector(0.6, 0.0, 0.8)
+        b_hat = SVector(0.0, 0.0, 1.0)
+        frame = build_dipole_frame((0.0, 0.0, -5.0); r_iono = 1.0)
+        x_sim = SVector(0.5, 0.4, 1.5)
+        x_smg = frame.rot * (x_sim - frame.center)
+        b0 = dipole_B0(frame, x_sim)
+
+        @test (@inferred evaluate_conductance(m_unif, 0.5, 0.5, r_hat, 0.0)) isa Tuple{Float64, Float64}
+        @test (@inferred evaluate_conductance(m_euv, 0.5, 0.5, r_hat, 0.0)) isa Tuple{Float64, Float64}
+        @test (@inferred evaluate_conductance(m_mb, 0.5, 0.5, r_hat, 0.0)) isa Tuple{Float64, Float64}
+        @test (@inferred evaluate_conductance(m_aur, 0.5, 0.5, r_hat, 0.0; jr_outward = 1.0e-6)) isa Tuple{Float64, Float64}
+        @test (@inferred evaluate_conductance(m_cust, 0.5, 0.5, r_hat, 0.0)) isa Tuple{Float64, Float64}
+        @test (@inferred electron_mobility_tensor(2.0, 3.0, b_hat)) isa SMatrix{3, 3, Float64, 9}
+        @test (@inferred dipole_B0(frame, x_sim)) isa SVector{3, Float64}
+        @test (@inferred map_dipole_smg(x_smg, 1.0)) isa Tuple{Int, SVector{3, Float64}, Float64, Float64}
+        @test (@inferred map_dipole_smg_with_jacobian(x_smg, 1.0)) isa Tuple{Int, SVector{3, Float64}, Float64, Float64, SMatrix{2, 3, Float64, 6}}
+        @test (@inferred dipole_conductance_tensor(5.0, 2.0, 0.8, 0.6, -1.0)) isa Tuple{Float64, Float64, Float64}
+        @test (@inferred dipole_fac_sample_point(frame, 0.4, 1.0, 2.0)) isa Tuple{Bool, SVector{3, Float64}, SVector{3, Float64}, SVector{3, Float64}, Float64, Float64}
+
+        # Float32 end-to-end stability and 0 B steady-state allocation
+        cfg32 = IonosphereConfig(
+            ;
+            n_theta_hem = 17, n_phi = 32,
+            conductance = AuroralConductance(SolarEUVConductance(; FT = Float32); FT = Float32),
+            FT = Float32,
+        )
+        sol32 = IonosphereSolver(cfg32; r_iono = 1.0f0, dipole_moment = (0.0f0, 0.0f0, -3.0f-5))
+        jr32 = [1.0f-6 * sin(sol32.theta[i])^2 * sin(sol32.phi[j]) for i in 1:sol32.n_theta, j in 1:sol32.n_phi]
+        @test (@inferred solve_ionosphere!(sol32, jr32))
+        @test (@allocated solve_ionosphere!(sol32, jr32)) == 0
+        vf32 = @inferred ionosphere_field_view(sol32)
+        x32 = SVector(0.5f0, 0.4f0, 1.5f0)
+        b32 = @inferred dipole_B0(sol32.frame, x32)
+        @test (@inferred eval_ionosphere_E(vf32, x32; B0 = b32)) isa SVector{3, Float32}
+        @test (@inferred eval_ionosphere_u_exb(vf32, x32, b32)) isa SVector{3, Float32}
+        @test (@allocated eval_ionosphere_E(vf32, x32; B0 = b32)) == 0
+        @test (@allocated eval_ionosphere_u_exb(vf32, x32, b32)) == 0
+
+        # Additional 0 B steady-state solve paths (Dirichlet + smooth + relax, Neumann)
+        for (bc, nsm, rlx) in ((:dirichlet, 2, 0.5), (:neumann, 1, 0.8))
+            cfg_z = IonosphereConfig(
+                ;
+                n_theta_hem = 21, n_phi = 36,
+                low_lat_bc = bc, n_smooth_fac = nsm, relax_alpha = rlx,
+                conductance = AuroralConductance(MoenBrekkeEUVConductance()),
+            )
+            sol_z = IonosphereSolver(cfg_z; r_iono = 1.0, dipole_moment = (0.0, 0.0, -5.0))
+            jr_z = [1.0e-6 * sin(sol_z.theta[i])^2 * sin(sol_z.phi[j]) for i in 1:sol_z.n_theta, j in 1:sol_z.n_phi]
+            @test solve_ionosphere!(sol_z, jr_z)
+            @test (@allocated solve_ionosphere!(sol_z, jr_z)) == 0
+        end
+
+        # Wavefront edge-case grid sizes: n_th = 1, n_th = 2, n_phi = 10, n_th > n_ph
+        for (nth_hem, np, lat_b, bc) in (
+                (5, 8, 65.0, :dirichlet),   # n_th == 1
+                (5, 10, 40.0, :dirichlet),  # n_th == 2, n_phi == 10
+                (5, 10, 40.0, :neumann),    # n_th == 2, Neumann
+                (15, 8, 20.0, :dirichlet),  # n_th > n_ph
+                (15, 8, 20.0, :neumann),    # n_th > n_ph, Neumann
+            )
+            cfg_e = IonosphereConfig(
+                ;
+                n_theta_hem = nth_hem, n_phi = np, lat_boundary_deg = lat_b,
+                low_lat_bc = bc, conductance = UniformConductance(5.0, 2.0),
+                tol = 1.0e-10, max_iter = 500,
+            )
+            sol_e = IonosphereSolver(cfg_e; r_iono = 1.0, dipole_moment = (0.0, 0.0, -5.0))
+            jr_e = [1.0e-6 * sin(sol_e.theta[i]) * sin(sol_e.phi[j]) for i in 1:sol_e.n_theta, j in 1:sol_e.n_phi]
+            @test solve_ionosphere!(sol_e, jr_e)
+            @test (@allocated solve_ionosphere!(sol_e, jr_e)) == 0
+            cp_e = @inferred cross_polar_cap_potential(sol_e)
+            @test isapprox(cp_e.north, cp_e.south; rtol = 1.0e-6)
+        end
     end
 end

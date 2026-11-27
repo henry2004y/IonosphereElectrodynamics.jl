@@ -11,6 +11,7 @@ module Ionosphere
 
 using Adapt: Adapt
 using LinearAlgebra: cross, dot, norm
+using MuladdMacro: @muladd
 using PrecompileTools: @compile_workload, @setup_workload
 using StaticArrays: SMatrix, SVector
 

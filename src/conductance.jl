@@ -160,8 +160,14 @@ struct AuroralConductance{FT <: AbstractFloat, B <: AbstractConductanceModel} <:
     sigma_P_max::FT
     hall_ratio::FT
     fac_scale::FT
+    inv_fac_scale::FT
     mode::Symbol
 end
+
+AuroralConductance{FT, B}(
+    base::B, sigma_P_max::FT, hall_ratio::FT, fac_scale::FT, mode::Symbol,
+) where {FT <: AbstractFloat, B <: AbstractConductanceModel} =
+    AuroralConductance{FT, B}(base, sigma_P_max, hall_ratio, fac_scale, inv(fac_scale), mode)
 
 function AuroralConductance(
         base::B;
@@ -179,8 +185,9 @@ function AuroralConductance(
         throw(ArgumentError("fac_scale must be finite and > 0 (got $fac_scale)"))
     mode in (:tanh_sqrt, :saturating) ||
         throw(ArgumentError("mode must be :tanh_sqrt or :saturating (got $mode)"))
+    fs = FT(fac_scale)
     return AuroralConductance{FT, B}(
-        base, FT(sigma_P_max), FT(hall_ratio), FT(fac_scale), mode,
+        base, FT(sigma_P_max), FT(hall_ratio), fs, inv(fs), mode,
     )
 end
 
@@ -216,18 +223,20 @@ vector `r_hat`, simulation time `t`, and optional outward FAC `jr_outward`.
     return (m.sigma_P, m.sigma_H)
 end
 
-@inline function evaluate_conductance(
+@inline @muladd function evaluate_conductance(
         m::SolarEUVConductance{FT}, theta::Real, phi::Real, r_hat::SVector{3, FT}, t::Real;
         jr_outward::Real = zero(FT),
     ) where {FT}
     c = max(zero(FT), dot(r_hat, m.sun_dir))
     f = c > zero(FT) ? c^m.exponent : zero(FT)
-    sp = hypot(m.sigma_P_night, m.sigma_P_day * f)
-    sh = hypot(m.sigma_H_night, m.sigma_H_day * f)
+    sp_d = m.sigma_P_day * f
+    sh_d = m.sigma_H_day * f
+    sp = sqrt(m.sigma_P_night * m.sigma_P_night + sp_d * sp_d)
+    sh = sqrt(m.sigma_H_night * m.sigma_H_night + sh_d * sh_d)
     return (sp, sh)
 end
 
-@inline function evaluate_conductance(
+@inline @muladd function evaluate_conductance(
         m::MoenBrekkeEUVConductance{FT}, theta::Real, phi::Real, r_hat::SVector{3, FT}, t::Real;
         jr_outward::Real = zero(FT),
     ) where {FT}
@@ -236,12 +245,15 @@ end
         sc = sqrt(c)
         sp_euv = m.f107_ped * (FT(0.34) * c + FT(0.93) * sc)
         sh_euv = m.f107_hall * (FT(0.81) * c + FT(0.54) * sc)
-        return (hypot(m.sigma_P_night, sp_euv), hypot(m.sigma_H_night, sh_euv))
+        return (
+            sqrt(m.sigma_P_night * m.sigma_P_night + sp_euv * sp_euv),
+            sqrt(m.sigma_H_night * m.sigma_H_night + sh_euv * sh_euv),
+        )
     end
     return (m.sigma_P_night, m.sigma_H_night)
 end
 
-@inline function evaluate_conductance(
+@inline @muladd function evaluate_conductance(
         m::AuroralConductance{FT}, theta::Real, phi::Real, r_hat::SVector{3, FT}, t::Real;
         jr_outward::Real = zero(FT),
     ) where {FT}
@@ -252,12 +264,12 @@ end
     sh = FT(sh_base)
     j_up = max(zero(FT), FT(jr_outward))
     if j_up > zero(FT) && m.sigma_P_max > zero(FT)
-        ratio = j_up / m.fac_scale
+        ratio = j_up * m.inv_fac_scale
         f_aur = m.mode === :tanh_sqrt ? tanh(sqrt(ratio)) : (ratio / (ratio + one(FT)))
         sp_aur = m.sigma_P_max * f_aur
         sh_aur = m.hall_ratio * sp_aur
-        sp = hypot(sp, sp_aur)
-        sh = hypot(sh, sh_aur)
+        sp = sqrt(sp * sp + sp_aur * sp_aur)
+        sh = sqrt(sh * sh + sh_aur * sh_aur)
     end
     return (sp, sh)
 end
@@ -282,7 +294,7 @@ end
 Construct the anisotropic 3D conductance/mobility tensor
 `sigma_0 b bᵀ + sigma_p (I - b bᵀ) + sigma_h (b ×)`.
 """
-@inline function electron_mobility_tensor(
+@inline @muladd function electron_mobility_tensor(
         sigma_p::Real,
         sigma_h::Real,
         b_hat::SVector{3, FT};

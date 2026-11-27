@@ -15,6 +15,8 @@ struct IonosphereFieldView{FT <: AbstractFloat, Mat <: AbstractMatrix{FT}}
     n_phi::Int
     dtheta::FT
     dphi::FT
+    inv_dtheta::FT
+    inv_dphi::FT
     lat_boundary_rad::FT
     omega_corot::SVector{3, FT}
     dphi_dtheta::Mat
@@ -22,6 +24,23 @@ struct IonosphereFieldView{FT <: AbstractFloat, Mat <: AbstractMatrix{FT}}
     pole_grad_N::SVector{2, FT}
     pole_grad_S::SVector{2, FT}
 end
+
+IonosphereFieldView{FT, Mat}(
+    frame::DipoleFrame{FT},
+    n_theta::Int,
+    n_phi::Int,
+    dtheta::FT,
+    dphi::FT,
+    lat_boundary_rad::FT,
+    omega_corot::SVector{3, FT},
+    dphi_dtheta::Mat,
+    dphi_dphi::Mat,
+    pole_grad_N::SVector{2, FT},
+    pole_grad_S::SVector{2, FT},
+) where {FT <: AbstractFloat, Mat <: AbstractMatrix{FT}} = IonosphereFieldView{FT, Mat}(
+    frame, n_theta, n_phi, dtheta, dphi, inv(dtheta), inv(dphi),
+    lat_boundary_rad, omega_corot, dphi_dtheta, dphi_dphi, pole_grad_N, pole_grad_S,
+)
 
 function Adapt.adapt_structure(to, v::IonosphereFieldView{FT}) where {FT}
     dth_dev = Adapt.adapt(to, v.dphi_dtheta)
@@ -32,6 +51,8 @@ function Adapt.adapt_structure(to, v::IonosphereFieldView{FT}) where {FT}
         v.n_phi,
         v.dtheta,
         v.dphi,
+        v.inv_dtheta,
+        v.inv_dphi,
         v.lat_boundary_rad,
         v.omega_corot,
         dth_dev,
@@ -53,6 +74,8 @@ function ionosphere_field_view(solver::IonosphereSolver{FT}) where {FT}
         solver.n_phi,
         solver.dtheta,
         solver.dphi,
+        inv(solver.dtheta),
+        inv(solver.dphi),
         solver.lat_boundary_rad,
         solver.config.omega_corot,
         solver.dphi_dtheta,
@@ -62,10 +85,10 @@ function ionosphere_field_view(solver::IonosphereSolver{FT}) where {FT}
     )
 end
 
-@inline function _eval_convection_E_smg(
+@inline @muladd function _eval_convection_E_smg(
         v::IonosphereFieldView{FT}, x_smg::SVector{3, FT},
     ) where {FT <: AbstractFloat}
-    r2 = dot(x_smg, x_smg)
+    r2 = x_smg[1] * x_smg[1] + x_smg[2] * x_smg[2] + x_smg[3] * x_smg[3]
     r = sqrt(r2)
     r <= FT(1.0e-12) && return zero(SVector{3, FT})
 
@@ -83,13 +106,13 @@ end
     mag_lat = abs(FT(0.5 * pi) - theta)
     mag_lat <= v.lat_boundary_rad && return zero(SVector{3, FT})
 
-    t_norm = theta / v.dtheta + one(FT)
-    p_norm = mod(phi, FT(2 * pi)) / v.dphi
-    i0 = clamp(floor(Int, t_norm), 1, v.n_theta - 1)
+    t_norm = theta * v.inv_dtheta + one(FT)
+    p_norm = phi * v.inv_dphi
+    i0 = clamp(unsafe_trunc(Int, floor(t_norm)), 1, v.n_theta - 1)
     i1 = i0 + 1
     wt = clamp(t_norm - FT(i0), zero(FT), one(FT))
 
-    j0_raw = floor(Int, p_norm)
+    j0_raw = unsafe_trunc(Int, floor(p_norm))
     j0 = mod(j0_raw, v.n_phi) + 1
     j1 = j0 == v.n_phi ? 1 : j0 + 1
     wp = p_norm - FT(j0_raw)
@@ -104,10 +127,12 @@ end
         dp10 = v.dphi_dphi[i1, j0]
         dp11 = v.dphi_dphi[i1, j1]
     end
-    dPdT = (one(FT) - wt) * ((one(FT) - wp) * dt00 + wp * dt01) +
-        wt * ((one(FT) - wp) * dt10 + wp * dt11)
-    dPdP = (one(FT) - wt) * ((one(FT) - wp) * dp00 + wp * dp01) +
-        wt * ((one(FT) - wp) * dp10 + wp * dp11)
+    dt0 = dt00 + wp * (dt01 - dt00)
+    dt1 = dt10 + wp * (dt11 - dt10)
+    dPdT = dt0 + wt * (dt1 - dt0)
+    dp0 = dp00 + wp * (dp01 - dp00)
+    dp1 = dp10 + wp * (dp11 - dp10)
+    dPdP = dp0 + wt * (dp1 - dp0)
 
     return SVector{3, FT}(
         -(dPdT * jac_smg[1, 1] + dPdP * jac_smg[2, 1]),
@@ -129,7 +154,7 @@ via the exact dipole Jacobian (with smooth ``m=1`` polar-axis regularity at ``\\
 When `B0` is supplied and `view.omega_corot` is non-zero, adds the exact 3D planetary
 corotation electric field ``-(\\boldsymbol{\\Omega}_{\\text{corot}} \\times \\Delta\\mathbf{r}) \\times \\mathbf{B}_0``.
 """
-@inline function eval_ionosphere_E(
+@inline @muladd function eval_ionosphere_E(
         v::IonosphereFieldView{FT},
         x_sim::SVector{3, FT};
         B0::Union{Nothing, SVector{3, FT}} = nothing,
@@ -162,7 +187,7 @@ Evaluate the mapped magnetospheric convection velocity
 ``\\mathbf{u} = (\\mathbf{E}_{\\text{conv}} \\times \\mathbf{B}_0) / |\\mathbf{B}_0|^2 + \\boldsymbol{\\Omega}_{\\text{corot}} \\times \\Delta\\mathbf{r}``
 at simulation position `x_sim`, optionally capped at `|u| <= u_max`.
 """
-@inline function eval_ionosphere_u_exb(
+@inline @muladd function eval_ionosphere_u_exb(
         v::IonosphereFieldView{FT},
         x_sim::SVector{3, FT},
         B0::SVector{3, FT};
@@ -172,10 +197,10 @@ at simulation position `x_sim`, optionally capped at `|u| <= u_max`.
     x_smg = v.frame.rot * dr
     e_smg = _eval_convection_E_smg(v, x_smg)
     e_conv = transpose(v.frame.rot) * e_smg
-    b2 = dot(B0, B0)
+    b2 = B0[1] * B0[1] + B0[2] * B0[2] + B0[3] * B0[3]
     u_conv = b2 > FT(1.0e-30) ? (cross(e_conv, B0) / b2) : zero(SVector{3, FT})
     u = u_conv + cross(v.omega_corot, dr)
-    um = norm(u)
+    um = sqrt(u[1] * u[1] + u[2] * u[2] + u[3] * u[3])
     if um > u_max
         u = u * (u_max / um)
     end

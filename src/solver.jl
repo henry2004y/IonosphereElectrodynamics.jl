@@ -190,13 +190,21 @@ function IonosphereConfig(
 end
 
 # ------------------------------------------------------------------------------
-# Five-Point Spherical Operator + ILU(0) + Right-Preconditioned BiCGSTAB (0 B)
+# Five-Point Spherical Operator (Wavefront-Reordered) + ILU(0) + BiCGSTAB (0 B)
 # ------------------------------------------------------------------------------
 struct _FivePointHemisphereOp{FT <: AbstractFloat}
     n_th::Int
     n_ph::Int
+    n_diag::Int
     is_north::Bool
     is_neumann::Bool
+    diag_ptr::Vector{Int}
+    diag_i_lo::Vector{Int}
+    wf_idx::Matrix{Int}
+    pole_idx::Vector{Int}
+    wrap_prev::Vector{Int}
+    wrap_next::Vector{Int}
+    k_pin::Int
     cA::Vector{FT}
     cB::Vector{FT}
     cC::Vector{FT}
@@ -211,8 +219,40 @@ end
 
 function _FivePointHemisphereOp{FT}(n_th::Int, n_ph::Int, is_north::Bool, is_neumann::Bool) where {FT}
     n = n_th * n_ph
+    n_diag = n_th + n_ph - 1
+    diag_ptr = Vector{Int}(undef, n_diag + 1)
+    diag_i_lo = Vector{Int}(undef, n_diag)
+    wf_idx = Matrix{Int}(undef, n_th, n_ph)
+    ptr = 1
+    @inbounds for d in 1:n_diag
+        diag_ptr[d] = ptr
+        i_lo = max(1, d - n_ph + 1)
+        i_hi = min(n_th, d)
+        diag_i_lo[d] = i_lo
+        for i in i_lo:i_hi
+            j = d + 1 - i
+            wf_idx[i, j] = ptr
+            ptr += 1
+        end
+    end
+    @inbounds diag_ptr[n_diag + 1] = ptr
+
+    i_pole_nb = is_north ? 1 : n_th
+    pole_idx = Vector{Int}(undef, n_ph)
+    @inbounds for j in 1:n_ph
+        pole_idx[j] = wf_idx[i_pole_nb, j]
+    end
+    wrap_prev = Vector{Int}(undef, n_th)
+    wrap_next = Vector{Int}(undef, n_th)
+    @inbounds for i in 1:n_th
+        wrap_prev[i] = wf_idx[i, n_ph]
+        wrap_next[i] = wf_idx[i, 1]
+    end
+    k_pin = @inbounds wf_idx[is_north ? n_th : 1, 1]
+
     return _FivePointHemisphereOp{FT}(
-        n_th, n_ph, is_north, is_neumann,
+        n_th, n_ph, n_diag, is_north, is_neumann,
+        diag_ptr, diag_i_lo, wf_idx, pole_idx, wrap_prev, wrap_next, k_pin,
         zeros(FT, n), zeros(FT, n), zeros(FT, n), zeros(FT, n), zeros(FT, n),
         zeros(FT, n), zeros(FT, n), zeros(FT, n), zeros(FT, n), zeros(FT, n),
     )
@@ -238,126 +278,265 @@ function _BiCGSTABWorkspace{FT}(n::Int) where {FT}
     )
 end
 
-function _build_ilu0!(op::_FivePointHemisphereOp{FT}) where {FT}
+@muladd function _build_ilu0!(op::_FivePointHemisphereOp{FT}) where {FT}
     n_th = op.n_th
     n_ph = op.n_ph
+    n_diag = op.n_diag
     n = n_th * n_ph
+    diag_ptr = op.diag_ptr
+    diag_i_lo = op.diag_i_lo
     dInv, eL, fU, e1L, f1U = op.dInv, op.eL, op.fU, op.e1L, op.f1U
     cA, cB, cC, cD, cE = op.cA, op.cB, op.cC, op.cD, op.cE
 
-    @inbounds for j in 1:n_ph
-        off = (j - 1) * n_th
-        for i in 1:n_th
-            k = off + i
-            dInv[k] = cA[k]
-            eL[k] = i > 1 ? cB[k] : zero(FT)
-            fU[k] = i < n_th ? cC[k] : zero(FT)
-            e1L[k] = j > 1 ? cD[k] : zero(FT)
-            f1U[k] = j < n_ph ? cE[k] : zero(FT)
-        end
+    @inbounds @simd for k in 1:n
+        dInv[k] = cA[k]
+        eL[k] = cB[k]
+        fU[k] = cC[k]
+        e1L[k] = cD[k]
+        f1U[k] = cE[k]
+    end
+    @inbounds for d in 1:n_diag
+        p_d = diag_ptr[d]
+        L = diag_ptr[d + 1] - p_d
+        i_lo = diag_i_lo[d]
+        i_hi = i_lo + L - 1
+        j_hi = d + 1 - i_lo
+        j_lo = d + 1 - i_hi
+        i_lo == 1 && (eL[p_d] = zero(FT))
+        i_hi == n_th && (fU[p_d + L - 1] = zero(FT))
+        j_lo == 1 && (e1L[p_d + L - 1] = zero(FT))
+        j_hi == n_ph && (f1U[p_d] = zero(FT))
     end
 
-    @inbounds for k in 1:n
-        pivot = dInv[k]
-        if k > 1
-            pivot -= eL[k] * fU[k - 1] * dInv[k - 1]
+    eps_piv = FT(1.0e-30)
+    @inbounds begin
+        piv1 = dInv[1]
+        if abs(piv1) < eps_piv
+            piv1 = piv1 >= zero(FT) ? eps_piv : -eps_piv
         end
-        if k > n_th
-            pivot -= e1L[k] * f1U[k - n_th] * dInv[k - n_th]
+        dInv[1] = one(FT) / piv1
+
+        for d in 2:n_diag
+            p_d = diag_ptr[d]
+            L = diag_ptr[d + 1] - p_d
+            i_lo = diag_i_lo[d]
+            i_hi = i_lo + L - 1
+            j_lo = d + 1 - i_hi
+            base_im1 = diag_ptr[d - 1] + (i_lo - diag_i_lo[d - 1]) - 1
+            has_head = i_lo == 1
+            has_tail = j_lo == 1
+
+            if has_head
+                piv = dInv[p_d] - e1L[p_d] * f1U[base_im1 + 1] * dInv[base_im1 + 1]
+                piv = ifelse(abs(piv) < eps_piv, ifelse(piv >= zero(FT), eps_piv, -eps_piv), piv)
+                dInv[p_d] = one(FT) / piv
+            end
+
+            t_start = has_head ? 1 : 0
+            t_end = has_tail ? (L - 2) : (L - 1)
+            @simd ivdep for t in t_start:t_end
+                k = p_d + t
+                kp = base_im1 + t
+                piv = dInv[k] - eL[k] * fU[kp] * dInv[kp] - e1L[k] * f1U[kp + 1] * dInv[kp + 1]
+                piv = ifelse(abs(piv) < eps_piv, ifelse(piv >= zero(FT), eps_piv, -eps_piv), piv)
+                dInv[k] = one(FT) / piv
+            end
+
+            if has_tail
+                k = p_d + L - 1
+                kp = base_im1 + L - 1
+                piv = dInv[k] - eL[k] * fU[kp] * dInv[kp]
+                piv = ifelse(abs(piv) < eps_piv, ifelse(piv >= zero(FT), eps_piv, -eps_piv), piv)
+                dInv[k] = one(FT) / piv
+            end
         end
-        if abs(pivot) < FT(1.0e-30)
-            pivot = pivot >= zero(FT) ? FT(1.0e-30) : -FT(1.0e-30)
+
+        @simd for k in 1:n
+            di = dInv[k]
+            eL[k] *= di
+            e1L[k] *= di
+            fU[k] *= di
+            f1U[k] *= di
         end
-        dInv[k] = one(FT) / pivot
     end
     return nothing
 end
 
-function _apply_ilu0!(z::Vector{FT}, r::Vector{FT}, op::_FivePointHemisphereOp{FT}) where {FT}
+@muladd function _apply_ilu0!(z::Vector{FT}, r::Vector{FT}, op::_FivePointHemisphereOp{FT}) where {FT}
     n_th = op.n_th
-    n = n_th * op.n_ph
+    n_ph = op.n_ph
+    n_diag = op.n_diag
+    diag_ptr = op.diag_ptr
+    diag_i_lo = op.diag_i_lo
     dInv, eL, fU, e1L, f1U = op.dInv, op.eL, op.fU, op.e1L, op.f1U
 
-    @inbounds for k in 1:n
-        val = r[k]
-        if k > 1
-            val -= eL[k] * z[k - 1]
+    @inbounds begin
+        z[1] = r[1] * dInv[1]
+        for d in 2:n_diag
+            p_d = diag_ptr[d]
+            L = diag_ptr[d + 1] - p_d
+            i_lo = diag_i_lo[d]
+            i_hi = i_lo + L - 1
+            j_lo = d + 1 - i_hi
+            base_im1 = diag_ptr[d - 1] + (i_lo - diag_i_lo[d - 1]) - 1
+            has_head = i_lo == 1
+            has_tail = j_lo == 1
+
+            if has_head
+                z[p_d] = r[p_d] * dInv[p_d] - e1L[p_d] * z[base_im1 + 1]
+            end
+
+            t_start = has_head ? 1 : 0
+            t_end = has_tail ? (L - 2) : (L - 1)
+            @simd ivdep for t in t_start:t_end
+                k = p_d + t
+                kp = base_im1 + t
+                z[k] = r[k] * dInv[k] - eL[k] * z[kp] - e1L[k] * z[kp + 1]
+            end
+
+            if has_tail
+                k = p_d + L - 1
+                kp = base_im1 + L - 1
+                z[k] = r[k] * dInv[k] - eL[k] * z[kp]
+            end
         end
-        if k > n_th
-            val -= e1L[k] * z[k - n_th]
+
+        for d in (n_diag - 1):-1:1
+            p_d = diag_ptr[d]
+            L = diag_ptr[d + 1] - p_d
+            i_lo = diag_i_lo[d]
+            i_hi = i_lo + L - 1
+            j_hi = d + 1 - i_lo
+            base_jp1 = diag_ptr[d + 1] + (i_lo - diag_i_lo[d + 1])
+            has_head = j_hi == n_ph
+            has_tail = i_hi == n_th
+
+            if has_head
+                z[p_d] -= fU[p_d] * z[base_jp1 + 1]
+            end
+
+            t_start = has_head ? 1 : 0
+            t_end = has_tail ? (L - 2) : (L - 1)
+            @simd ivdep for t in t_start:t_end
+                k = p_d + t
+                kn = base_jp1 + t
+                z[k] = z[k] - f1U[k] * z[kn] - fU[k] * z[kn + 1]
+            end
+
+            if has_tail
+                k = p_d + L - 1
+                kn = base_jp1 + L - 1
+                z[k] -= f1U[k] * z[kn]
+            end
         end
-        z[k] = val * dInv[k]
-    end
-    @inbounds for k in n:-1:1
-        val = zero(FT)
-        if k + 1 <= n
-            val += fU[k] * z[k + 1]
-        end
-        if k + n_th <= n
-            val += f1U[k] * z[k + n_th]
-        end
-        z[k] -= dInv[k] * val
     end
     return nothing
 end
 
-function _matvec!(y::Vector{FT}, x::Vector{FT}, op::_FivePointHemisphereOp{FT}) where {FT}
+@inline @muladd function _matvec_boundary_point!(
+        y::Vector{FT},
+        x::Vector{FT},
+        op::_FivePointHemisphereOp{FT},
+        k::Int,
+        i::Int,
+        j::Int,
+        pole_avg::FT,
+        base_im1::Int,
+        base_jp1::Int,
+        t::Int,
+    ) where {FT}
     n_th = op.n_th
     n_ph = op.n_ph
     is_north = op.is_north
     is_neumann = op.is_neumann
-    cA, cB, cC, cD, cE = op.cA, op.cB, op.cC, op.cD, op.cE
-
-    pole_avg = zero(FT)
-    i_pole_nb = is_north ? 1 : n_th
-    @inbounds for j in 1:n_ph
-        pole_avg += x[(j - 1) * n_th + i_pole_nb]
-    end
-    pole_avg /= FT(n_ph)
-
-    @inbounds for j in 1:n_ph
-        j_prev = j == 1 ? n_ph : j - 1
-        j_next = j == n_ph ? 1 : j + 1
-        col_off = (j - 1) * n_th
-        prev_off = (j_prev - 1) * n_th
-        next_off = (j_next - 1) * n_th
-        for i in 1:n_th
-            k = col_off + i
-            x_im1 = if i > 1
-                x[col_off + i - 1]
-            elseif is_north
-                pole_avg
-            else
-                is_neumann ? x[k] : zero(FT)
-            end
-            x_ip1 = if i < n_th
-                x[col_off + i + 1]
-            elseif is_north
-                is_neumann ? x[k] : zero(FT)
-            else
-                pole_avg
-            end
-            y[k] = cA[k] * x[k] + cB[k] * x_im1 + cC[k] * x_ip1 +
-                cD[k] * x[prev_off + i] + cE[k] * x[next_off + i]
+    @inbounds begin
+        x_k = x[k]
+        x_im1 = if i > 1
+            x[base_im1 + t]
+        elseif is_north
+            pole_avg
+        else
+            is_neumann ? x_k : zero(FT)
         end
-    end
-
-    if is_neumann && n_th > 0 && n_ph > 0
-        k_pin = is_north ? n_th : 1
-        @inbounds y[k_pin] = x[k_pin]
+        x_ip1 = if i < n_th
+            x[base_jp1 + t + 1]
+        elseif is_north
+            is_neumann ? x_k : zero(FT)
+        else
+            pole_avg
+        end
+        x_jm1 = j > 1 ? x[base_im1 + t + 1] : x[op.wrap_prev[i]]
+        x_jp1 = j < n_ph ? x[base_jp1 + t] : x[op.wrap_next[i]]
+        y[k] = op.cA[k] * x_k + op.cB[k] * x_im1 + op.cC[k] * x_ip1 +
+            op.cD[k] * x_jm1 + op.cE[k] * x_jp1
     end
     return nothing
 end
 
-@inline function _vec_dot(a::Vector{FT}, b::Vector{FT}) where {FT}
+@muladd function _matvec!(y::Vector{FT}, x::Vector{FT}, op::_FivePointHemisphereOp{FT}) where {FT}
+    n_th = op.n_th
+    n_ph = op.n_ph
+    n_diag = op.n_diag
+    diag_ptr = op.diag_ptr
+    diag_i_lo = op.diag_i_lo
+    pole_idx = op.pole_idx
+    cA, cB, cC, cD, cE = op.cA, op.cB, op.cC, op.cD, op.cE
+
+    pole_avg = zero(FT)
+    @inbounds @simd for j in 1:n_ph
+        pole_avg += x[pole_idx[j]]
+    end
+    pole_avg /= FT(n_ph)
+
+    @inbounds for d in 1:n_diag
+        p_d = diag_ptr[d]
+        L = diag_ptr[d + 1] - p_d
+        i_lo = diag_i_lo[d]
+        i_hi = i_lo + L - 1
+        j_hi = d + 1 - i_lo
+        j_lo = d + 1 - i_hi
+        base_im1 = d > 1 ? (diag_ptr[d - 1] + (i_lo - diag_i_lo[d - 1]) - 1) : 0
+        base_jp1 = d < n_diag ? (diag_ptr[d + 1] + (i_lo - diag_i_lo[d + 1])) : 0
+
+        _matvec_boundary_point!(y, x, op, p_d, i_lo, j_hi, pole_avg, base_im1, base_jp1, 0)
+        if L >= 2
+            @simd ivdep for t in 1:(L - 2)
+                k = p_d + t
+                kp = base_im1 + t
+                kn = base_jp1 + t
+                y[k] = cA[k] * x[k] + cB[k] * x[kp] + cC[k] * x[kn + 1] +
+                    cD[k] * x[kp + 1] + cE[k] * x[kn]
+            end
+            _matvec_boundary_point!(y, x, op, p_d + L - 1, i_hi, j_lo, pole_avg, base_im1, base_jp1, L - 1)
+        end
+    end
+
+    if op.is_neumann && n_th > 0 && n_ph > 0
+        @inbounds y[op.k_pin] = x[op.k_pin]
+    end
+    return nothing
+end
+
+@inline @muladd function _vec_dot(a::Vector{FT}, b::Vector{FT}) where {FT}
     s = zero(FT)
-    @inbounds for k in eachindex(a, b)
+    @inbounds @simd for k in eachindex(a, b)
         s += a[k] * b[k]
     end
     return s
 end
 
-function _solve_bicgstab!(
+@inline @muladd function _vec_dot_pair(t::Vector{FT}, s::Vector{FT}) where {FT}
+    tt = zero(FT)
+    ts = zero(FT)
+    @inbounds @simd for k in eachindex(t, s)
+        tk = t[k]
+        tt += tk * tk
+        ts += tk * s[k]
+    end
+    return (tt, ts)
+end
+
+@muladd function _solve_bicgstab!(
         op::_FivePointHemisphereOp{FT},
         ws::_BiCGSTABWorkspace{FT},
         tol::FT,
@@ -367,22 +546,26 @@ function _solve_bicgstab!(
         ws.rhs, ws.x, ws.r, ws.r_hat, ws.p, ws.v, ws.s, ws.t, ws.y, ws.z
     n = length(rhs)
 
-    b_norm = sqrt(_vec_dot(rhs, rhs))
+    b_norm2 = _vec_dot(rhs, rhs)
+    b_norm = sqrt(b_norm2)
     if b_norm <= FT(1.0e-30)
         fill!(x, zero(FT))
         return true, 0, zero(FT)
     end
+    tiny_b = max(floatmin(FT), FT(1.0e-30) * b_norm2)
 
     _matvec!(v, x, op)
-    @inbounds for k in 1:n
+    r_norm2 = zero(FT)
+    @inbounds @simd for k in 1:n
         rk = rhs[k] - v[k]
         r[k] = rk
         r_hat[k] = rk
         p[k] = zero(FT)
         v[k] = zero(FT)
+        r_norm2 += rk * rk
     end
 
-    r_norm = sqrt(_vec_dot(r, r))
+    r_norm = sqrt(r_norm2)
     rel_res = r_norm / b_norm
     if rel_res <= tol
         return true, 0, rel_res
@@ -399,27 +582,27 @@ function _solve_bicgstab!(
         iters = it
         rho_new = _vec_dot(r_hat, r)
         if abs(rho_new) <= FT(1.0e-12) * r_hat_norm * r_norm
-            @inbounds for k in 1:n
+            @inbounds @simd for k in 1:n
                 rk = r[k]
                 r_hat[k] = rk
                 p[k] = rk
             end
             r_hat_norm = r_norm
             rho_new = r_norm * r_norm
-            if rho_new <= FT(1.0e-30)
+            if rho_new <= tiny_b
                 break
             end
             fresh_shadow = true
         end
 
         if fresh_shadow
-            @inbounds for k in 1:n
+            @inbounds @simd for k in 1:n
                 p[k] = r[k]
             end
             fresh_shadow = false
         else
             beta = (rho_new / rho_old) * (alpha / omega)
-            @inbounds for k in 1:n
+            @inbounds @simd for k in 1:n
                 p[k] = r[k] + beta * (p[k] - omega * v[k])
             end
         end
@@ -427,8 +610,8 @@ function _solve_bicgstab!(
         _apply_ilu0!(y, p, op)
         _matvec!(v, y, op)
         r_hat_v = _vec_dot(r_hat, v)
-        if abs(r_hat_v) <= FT(1.0e-30)
-            @inbounds for k in 1:n
+        if abs(r_hat_v) <= max(floatmin(FT), FT(1.0e-30) * (r_hat_norm * r_norm))
+            @inbounds @simd for k in 1:n
                 r_hat[k] = r[k]
             end
             r_hat_norm = r_norm
@@ -437,12 +620,15 @@ function _solve_bicgstab!(
         end
         alpha = rho_new / r_hat_v
 
-        @inbounds for k in 1:n
-            s[k] = r[k] - alpha * v[k]
+        s_norm2 = zero(FT)
+        @inbounds @simd for k in 1:n
+            sk = r[k] - alpha * v[k]
+            s[k] = sk
+            s_norm2 += sk * sk
         end
-        s_norm = sqrt(_vec_dot(s, s))
+        s_norm = sqrt(s_norm2)
         if s_norm / b_norm <= tol
-            @inbounds for k in 1:n
+            @inbounds @simd for k in 1:n
                 x[k] += alpha * y[k]
             end
             rel_res = s_norm / b_norm
@@ -451,28 +637,31 @@ function _solve_bicgstab!(
 
         _apply_ilu0!(z, s, op)
         _matvec!(t, z, op)
-        tt = _vec_dot(t, t)
-        if tt <= FT(1.0e-30)
-            @inbounds for k in 1:n
+        tt, ts = _vec_dot_pair(t, s)
+        if tt <= tiny_b
+            @inbounds @simd for k in 1:n
                 x[k] += alpha * y[k]
             end
             rel_res = s_norm / b_norm
             return rel_res <= tol, iters, rel_res
         end
-        omega = _vec_dot(t, s) / tt
+        omega = ts / tt
 
-        @inbounds for k in 1:n
+        r_norm2 = zero(FT)
+        @inbounds @simd for k in 1:n
             x[k] += alpha * y[k] + omega * z[k]
-            r[k] = s[k] - omega * t[k]
+            rk = s[k] - omega * t[k]
+            r[k] = rk
+            r_norm2 += rk * rk
         end
-        r_norm = sqrt(_vec_dot(r, r))
+        r_norm = sqrt(r_norm2)
         rel_res = r_norm / b_norm
         rho_old = rho_new
         if rel_res <= tol
             return true, iters, rel_res
         end
         if abs(omega) <= FT(1.0e-14)
-            @inbounds for k in 1:n
+            @inbounds @simd for k in 1:n
                 r_hat[k] = r[k]
             end
             r_hat_norm = r_norm
@@ -496,51 +685,51 @@ on both hemispheres using FLEKS's 5-point spherical finite-difference stencil an
 ILU(0)-preconditioned BiCGSTAB (`0 B` steady-state heap allocations).
 """
 mutable struct IonosphereSolver{FT <: AbstractFloat, C <: AbstractConductanceModel}
-    config::IonosphereConfig{FT, C}
-    frame::DipoleFrame{FT}
-    n_theta_hem::Int
-    n_theta::Int
-    n_phi::Int
-    dtheta::FT
-    dphi::FT
-    lat_boundary_rad::FT
-    i_min_N::Int
-    i_max_N::Int
-    i_min_S::Int
-    i_max_S::Int
+    const config::IonosphereConfig{FT, C}
+    const frame::DipoleFrame{FT}
+    const n_theta_hem::Int
+    const n_theta::Int
+    const n_phi::Int
+    const dtheta::FT
+    const dphi::FT
+    const lat_boundary_rad::FT
+    const i_min_N::Int
+    const i_max_N::Int
+    const i_min_S::Int
+    const i_max_S::Int
 
-    theta::Vector{FT}
-    phi::Vector{FT}
-    sin_theta::Vector{FT}
-    cos_theta::Vector{FT}
-    sin_phi::Vector{FT}
-    cos_phi::Vector{FT}
-    r_hat_sim::Array{FT, 3} # (3, n_theta, n_phi)
+    const theta::Vector{FT}
+    const phi::Vector{FT}
+    const sin_theta::Vector{FT}
+    const cos_theta::Vector{FT}
+    const sin_phi::Vector{FT}
+    const cos_phi::Vector{FT}
+    const r_hat_sim::Array{FT, 3} # (3, n_theta, n_phi)
 
-    jr_outward::Matrix{FT}
-    jr_work::Matrix{FT}
-    sigma_P::Matrix{FT}
-    sigma_H::Matrix{FT}
-    sigma_tt::Matrix{FT}
-    sigma_tp::Matrix{FT}
-    sigma_pp::Matrix{FT}
-    dsigma_tt_dth::Matrix{FT}
-    dsigma_tp_dth::Matrix{FT}
-    dsigma_tp_dph::Matrix{FT}
-    dsigma_pp_dph::Matrix{FT}
+    const jr_outward::Matrix{FT}
+    const jr_work::Matrix{FT}
+    const sigma_P::Matrix{FT}
+    const sigma_H::Matrix{FT}
+    const sigma_tt::Matrix{FT}
+    const sigma_tp::Matrix{FT}
+    const sigma_pp::Matrix{FT}
+    const dsigma_tt_dth::Matrix{FT}
+    const dsigma_tp_dth::Matrix{FT}
+    const dsigma_tp_dph::Matrix{FT}
+    const dsigma_pp_dph::Matrix{FT}
 
-    phi_solved::Matrix{FT}
-    phi_pot::Matrix{FT}
-    dphi_dtheta::Matrix{FT}
-    dphi_dphi::Matrix{FT}
+    const phi_solved::Matrix{FT}
+    const phi_pot::Matrix{FT}
+    const dphi_dtheta::Matrix{FT}
+    const dphi_dphi::Matrix{FT}
     pole_grad_N::SVector{2, FT}
     pole_grad_S::SVector{2, FT}
     has_prev_solution::Bool
 
-    op_N::_FivePointHemisphereOp{FT}
-    op_S::_FivePointHemisphereOp{FT}
-    ws_N::_BiCGSTABWorkspace{FT}
-    ws_S::_BiCGSTABWorkspace{FT}
+    const op_N::_FivePointHemisphereOp{FT}
+    const op_S::_FivePointHemisphereOp{FT}
+    const ws_N::_BiCGSTABWorkspace{FT}
+    const ws_S::_BiCGSTABWorkspace{FT}
 
     cpcp_north::FT
     cpcp_south::FT
@@ -605,8 +794,7 @@ function IonosphereSolver(
     @inbounds for i in 1:nt
         th = FT(i - 1) * dth
         theta[i] = th
-        sin_th[i] = sin(th)
-        cos_th[i] = cos(th)
+        sin_th[i], cos_th[i] = sincos(th)
     end
     sin_th[1] = zero(FT)
     cos_th[1] = one(FT)
@@ -621,8 +809,7 @@ function IonosphereSolver(
     @inbounds for j in 1:np
         ph = FT(j - 1) * dph
         phi[j] = ph
-        sin_ph[j] = sin(ph)
-        cos_ph[j] = cos(ph)
+        sin_ph[j], cos_ph[j] = sincos(ph)
     end
 
     rot_T = transpose(frame.rot)
@@ -717,19 +904,20 @@ function IonosphereSolver(
     return solver
 end
 
-function _smooth_jr!(solver::IonosphereSolver{FT}) where {FT}
+@muladd function _smooth_jr!(solver::IonosphereSolver{FT}) where {FT}
     n_pass = solver.config.n_smooth_fac
     n_pass <= 0 && return nothing
     nt = solver.n_theta
     np = solver.n_phi
     jr = solver.jr_outward
     tmp = solver.jr_work
+    inv_np = one(FT) / FT(np)
 
     for _ in 1:n_pass
         @inbounds for j in 1:np
             jm = j == 1 ? np : j - 1
             jp = j == np ? 1 : j + 1
-            for i in 2:(nt - 1)
+            @simd for i in 2:(nt - 1)
                 tmp[i, j] = FT(0.5) * jr[i, j] + FT(0.125) * (
                     jr[i - 1, j] + jr[i + 1, j] + jr[i, jm] + jr[i, jp]
                 )
@@ -741,7 +929,6 @@ function _smooth_jr!(solver::IonosphereSolver{FT}) where {FT}
             north_avg += tmp[2, j]
             south_avg += tmp[nt - 1, j]
         end
-        inv_np = one(FT) / FT(np)
         north_avg *= inv_np
         south_avg *= inv_np
         @inbounds for j in 1:np
@@ -753,63 +940,83 @@ function _smooth_jr!(solver::IonosphereSolver{FT}) where {FT}
     return nothing
 end
 
-function _compute_conductances_and_tensor!(solver::IonosphereSolver{FT}, t::FT) where {FT}
+@muladd function _compute_conductances_and_tensor!(solver::IonosphereSolver{FT}, t::FT) where {FT}
     nt = solver.n_theta
     np = solver.n_phi
     cfg = solver.config
+    cond = cfg.conductance
     sp_floor = max(cfg.sigma_P_floor, FT(1.0e-12))
     dip_sign = solver.frame.dipole_sign
     use_dip = cfg.use_dip_angle
     s0_ratio = cfg.sigma_0_ratio
-    s0_par = cfg.sigma_parallel
+    s0_par_raw = cfg.sigma_parallel
+    has_s0_par = s0_par_raw !== nothing
+    s0_par_val = s0_par_raw === nothing ? zero(FT) : max(s0_par_raw, FT(10))
+
+    theta = solver.theta
+    phi = solver.phi
+    cos_th = solver.cos_theta
+    sin_th = solver.sin_theta
+    r_hat_sim = solver.r_hat_sim
+    jr_outward = solver.jr_outward
+    sigma_P = solver.sigma_P
+    sigma_H = solver.sigma_H
+    sigma_tt = solver.sigma_tt
+    sigma_tp = solver.sigma_tp
+    sigma_pp = solver.sigma_pp
 
     @inbounds for j in 1:np
-        ph = solver.phi[j]
+        ph = phi[j]
         for i in 1:nt
-            th = solver.theta[i]
+            th = theta[i]
             rh = SVector{3, FT}(
-                solver.r_hat_sim[1, i, j],
-                solver.r_hat_sim[2, i, j],
-                solver.r_hat_sim[3, i, j],
+                r_hat_sim[1, i, j],
+                r_hat_sim[2, i, j],
+                r_hat_sim[3, i, j],
             )
             sp, sh = evaluate_conductance(
-                cfg.conductance, th, ph, rh, t; jr_outward = solver.jr_outward[i, j],
+                cond, th, ph, rh, t; jr_outward = jr_outward[i, j],
             )
             sp = max(FT(sp), sp_floor)
             sh_f = FT(sh)
-            solver.sigma_P[i, j] = sp
-            solver.sigma_H[i, j] = sh_f
-            s_tt, s_tp, s_pp = dipole_conductance_tensor(
-                sp, sh_f, solver.cos_theta[i], solver.sin_theta[i], dip_sign;
-                sigma_0_ratio = s0_ratio, sigma_parallel = s0_par, use_dip_angle = use_dip,
+            sigma_P[i, j] = sp
+            sigma_H[i, j] = sh_f
+            s0 = has_s0_par ? s0_par_val : (s0_ratio * sp)
+            s_tt, s_tp, s_pp = _dipole_conductance_tensor_core(
+                sp, sh_f, cos_th[i], sin_th[i], dip_sign, s0, use_dip,
             )
-            solver.sigma_tt[i, j] = s_tt
-            solver.sigma_tp[i, j] = s_tp
-            solver.sigma_pp[i, j] = s_pp
+            sigma_tt[i, j] = s_tt
+            sigma_tp[i, j] = s_tp
+            sigma_pp[i, j] = s_pp
         end
     end
 
     inv_2dth = FT(0.5) / solver.dtheta
     inv_2dph = FT(0.5) / solver.dphi
+    dtt_dth = solver.dsigma_tt_dth
+    dtp_dth = solver.dsigma_tp_dth
+    dtp_dph = solver.dsigma_tp_dph
+    dpp_dph = solver.dsigma_pp_dph
     @inbounds for j in 1:np
         jm = j == 1 ? np : j - 1
         jp = j == np ? 1 : j + 1
-        for i in 1:nt
-            if 1 < i < nt
-                solver.dsigma_tt_dth[i, j] = (solver.sigma_tt[i + 1, j] - solver.sigma_tt[i - 1, j]) * inv_2dth
-                solver.dsigma_tp_dth[i, j] = (solver.sigma_tp[i + 1, j] - solver.sigma_tp[i - 1, j]) * inv_2dth
-            else
-                solver.dsigma_tt_dth[i, j] = zero(FT)
-                solver.dsigma_tp_dth[i, j] = zero(FT)
-            end
-            solver.dsigma_tp_dph[i, j] = (solver.sigma_tp[i, jp] - solver.sigma_tp[i, jm]) * inv_2dph
-            solver.dsigma_pp_dph[i, j] = (solver.sigma_pp[i, jp] - solver.sigma_pp[i, jm]) * inv_2dph
+        dtt_dth[1, j] = zero(FT)
+        dtp_dth[1, j] = zero(FT)
+        dtt_dth[nt, j] = zero(FT)
+        dtp_dth[nt, j] = zero(FT)
+        @simd for i in 2:(nt - 1)
+            dtt_dth[i, j] = (sigma_tt[i + 1, j] - sigma_tt[i - 1, j]) * inv_2dth
+            dtp_dth[i, j] = (sigma_tp[i + 1, j] - sigma_tp[i - 1, j]) * inv_2dth
+        end
+        @simd for i in 1:nt
+            dtp_dph[i, j] = (sigma_tp[i, jp] - sigma_tp[i, jm]) * inv_2dph
+            dpp_dph[i, j] = (sigma_pp[i, jp] - sigma_pp[i, jm]) * inv_2dph
         end
     end
     return nothing
 end
 
-function _solve_hemisphere!(
+@muladd function _solve_hemisphere!(
         solver::IonosphereSolver{FT},
         is_north::Bool,
     ) where {FT}
@@ -822,10 +1029,10 @@ function _solve_hemisphere!(
     nt = solver.n_theta
     i_eq = solver.n_theta_hem
 
-    dth2 = solver.dtheta * solver.dtheta
-    dph2 = solver.dphi * solver.dphi
-    two_dth = FT(2) * solver.dtheta
-    two_dph = FT(2) * solver.dphi
+    inv_dth2 = inv(solver.dtheta * solver.dtheta)
+    inv_dph2 = inv(solver.dphi * solver.dphi)
+    inv_2dth = inv(FT(2) * solver.dtheta)
+    inv_2dph = inv(FT(2) * solver.dphi)
     r_iono2 = solver.frame.r_iono * solver.frame.r_iono
 
     # Neutralize net hemisphere FAC over active rows when configured or in Neumann mode
@@ -833,54 +1040,74 @@ function _solve_hemisphere!(
     if solver.config.neutralize_fac || op.is_neumann
         num = zero(FT)
         den = zero(FT)
-        @inbounds for j in 1:n_ph, i in i_min:i_max
-            w = solver.sin_theta[i]
-            num += solver.jr_outward[i, j] * w
-            den += w
+        sin_th = solver.sin_theta
+        jr_outward = solver.jr_outward
+        @inbounds for j in 1:n_ph
+            @simd for i in i_min:i_max
+                w = sin_th[i]
+                num += jr_outward[i, j] * w
+                den += w
+            end
         end
         if den > zero(FT)
             jr_shift = num / den
         end
     end
 
+    wf_idx = op.wf_idx
+    sin_th = solver.sin_theta
+    cos_th = solver.cos_theta
+    sigma_tt = solver.sigma_tt
+    sigma_pp = solver.sigma_pp
+    dtt_dth = solver.dsigma_tt_dth
+    dtp_dth = solver.dsigma_tp_dth
+    dtp_dph = solver.dsigma_tp_dph
+    dpp_dph = solver.dsigma_pp_dph
+    jr_outward = solver.jr_outward
+    phi_solved = solver.phi_solved
+    has_prev = solver.has_prev_solution
+    cA, cB, cC, cD, cE = op.cA, op.cB, op.cC, op.cD, op.cE
+    rhs, x = ws.rhs, ws.x
+
     @inbounds for j in 1:n_ph
-        off = (j - 1) * n_th
         for i_loc in 1:n_th
             i = i_min + i_loc - 1
-            k = off + i_loc
-            sn = solver.sin_theta[i]
-            cs = solver.cos_theta[i]
+            k = wf_idx[i_loc, j]
+            sn = sin_th[i]
+            cs = cos_th[i]
             sn2 = sn * sn
 
-            term_th2 = solver.sigma_tt[i, j] * sn2 / dth2
+            stt = sigma_tt[i, j]
+            spp = sigma_pp[i, j]
+            term_th2 = stt * sn2 * inv_dth2
             term_th1 = (
-                solver.sigma_tt[i, j] * sn * cs +
-                solver.dsigma_tt_dth[i, j] * sn2 -
-                solver.dsigma_tp_dph[i, j] * sn
-            ) / two_dth
-            term_ph2 = solver.sigma_pp[i, j] / dph2
-            term_ph1 = (solver.dsigma_tp_dth[i, j] * sn + solver.dsigma_pp_dph[i, j]) / two_dph
+                stt * sn * cs +
+                dtt_dth[i, j] * sn2 -
+                dtp_dph[i, j] * sn
+            ) * inv_2dth
+            term_ph2 = spp * inv_dph2
+            term_ph1 = (dtp_dth[i, j] * sn + dpp_dph[i, j]) * inv_2dph
 
-            op.cA[k] = -FT(2) * (term_th2 + term_ph2)
-            op.cB[k] = term_th2 - term_th1
-            op.cC[k] = term_th2 + term_th1
-            op.cD[k] = term_ph2 - term_ph1
-            op.cE[k] = term_ph2 + term_ph1
+            cA[k] = -FT(2) * (term_th2 + term_ph2)
+            cB[k] = term_th2 - term_th1
+            cC[k] = term_th2 + term_th1
+            cD[k] = term_ph2 - term_ph1
+            cE[k] = term_ph2 + term_ph1
 
-            ws.rhs[k] = (solver.jr_outward[i, j] - jr_shift) * r_iono2 * sn2
-            ws.x[k] = solver.has_prev_solution ? solver.phi_solved[i, j] : zero(FT)
+            rhs[k] = (jr_outward[i, j] - jr_shift) * r_iono2 * sn2
+            x[k] = has_prev ? phi_solved[i, j] : zero(FT)
         end
     end
 
     if op.is_neumann
-        k_pin = is_north ? n_th : 1
+        k_pin = op.k_pin
         @inbounds begin
-            ws.rhs[k_pin] = zero(FT)
-            op.cA[k_pin] = one(FT)
-            op.cB[k_pin] = zero(FT)
-            op.cC[k_pin] = zero(FT)
-            op.cD[k_pin] = zero(FT)
-            op.cE[k_pin] = zero(FT)
+            rhs[k_pin] = zero(FT)
+            cA[k_pin] = one(FT)
+            cB[k_pin] = zero(FT)
+            cC[k_pin] = zero(FT)
+            cD[k_pin] = zero(FT)
+            cE[k_pin] = zero(FT)
         end
     end
 
@@ -889,18 +1116,19 @@ function _solve_hemisphere!(
 
     i_clear_lo = is_north ? 1 : i_eq
     i_clear_hi = is_north ? i_eq : nt
-    @inbounds for j in 1:n_ph, i in i_clear_lo:i_clear_hi
-        solver.phi_solved[i, j] = zero(FT)
+    @inbounds for j in 1:n_ph
+        @simd for i in i_clear_lo:i_clear_hi
+            phi_solved[i, j] = zero(FT)
+        end
     end
 
-    phi_min = ws.x[1]
-    phi_max = ws.x[1]
+    phi_min = x[1]
+    phi_max = x[1]
     @inbounds for j in 1:n_ph
-        off = (j - 1) * n_th
         for i_loc in 1:n_th
             i = i_min + i_loc - 1
-            val = ws.x[off + i_loc]
-            solver.phi_solved[i, j] = val
+            val = x[wf_idx[i_loc, j]]
+            phi_solved[i, j] = val
             phi_min = min(phi_min, val)
             phi_max = max(phi_max, val)
         end
@@ -909,12 +1137,12 @@ function _solve_hemisphere!(
     i_pole = is_north ? 1 : nt
     i_adj = is_north ? 2 : nt - 1
     pole_val = zero(FT)
-    @inbounds for j in 1:n_ph
-        pole_val += solver.phi_solved[i_adj, j]
+    @inbounds @simd for j in 1:n_ph
+        pole_val += phi_solved[i_adj, j]
     end
     pole_val /= FT(n_ph)
     @inbounds for j in 1:n_ph
-        solver.phi_solved[i_pole, j] = pole_val
+        phi_solved[i_pole, j] = pole_val
     end
     phi_min = min(phi_min, pole_val)
     phi_max = max(phi_max, pole_val)
@@ -932,7 +1160,7 @@ function _solve_hemisphere!(
     return ok
 end
 
-function _compute_gradients!(solver::IonosphereSolver{FT}) where {FT}
+@muladd function _compute_gradients!(solver::IonosphereSolver{FT}) where {FT}
     nt = solver.n_theta
     np = solver.n_phi
     inv_2dth = FT(0.5) / solver.dtheta
@@ -942,7 +1170,7 @@ function _compute_gradients!(solver::IonosphereSolver{FT}) where {FT}
     dph = solver.dphi_dphi
 
     @inbounds for j in 1:np
-        for i in 2:(nt - 1)
+        @simd for i in 2:(nt - 1)
             dth[i, j] = (phi_pot[i + 1, j] - phi_pot[i - 1, j]) * inv_2dth
         end
         dth[1, j] = (FT(4) * phi_pot[2, j] - FT(3) * phi_pot[1, j] - phi_pot[3, j]) * inv_2dth
@@ -952,7 +1180,7 @@ function _compute_gradients!(solver::IonosphereSolver{FT}) where {FT}
     @inbounds for j in 1:np
         jm = j == 1 ? np : j - 1
         jp = j == np ? 1 : j + 1
-        for i in 1:nt
+        @simd for i in 1:nt
             dph[i, j] = (phi_pot[i, jp] - phi_pot[i, jm]) * inv_2dph
         end
     end
@@ -964,9 +1192,11 @@ function _compute_gradients!(solver::IonosphereSolver{FT}) where {FT}
     gy_n = zero(FT)
     gx_s = zero(FT)
     gy_s = zero(FT)
+    cos_phi = solver.cos_phi
+    sin_phi = solver.sin_phi
     @inbounds for j in 1:np
-        cp = solver.cos_phi[j]
-        sp = solver.sin_phi[j]
+        cp = cos_phi[j]
+        sp = sin_phi[j]
         dn = dth[1, j]
         ds = -dth[nt, j]
         gx_n += dn * cp
@@ -991,7 +1221,7 @@ Solve the 2D spherical ionospheric potential equation
 on both hemispheres in `0 B` steady-state heap allocations. Returns `true` if both
 hemispheric ILU(0)-BiCGSTAB solves converged within `solver.config.tol`.
 """
-function solve_ionosphere!(
+@muladd function solve_ionosphere!(
         solver::IonosphereSolver{FT},
         jr_in::AbstractMatrix{FT} = solver.jr_outward;
         t::Real = zero(FT),
@@ -1013,8 +1243,10 @@ function solve_ionosphere!(
         copyto!(solver.phi_pot, solver.phi_solved)
     else
         one_m_a = one(FT) - alpha
-        @inbounds for k in eachindex(solver.phi_pot, solver.phi_solved)
-            solver.phi_pot[k] = one_m_a * solver.phi_pot[k] + alpha * solver.phi_solved[k]
+        phi_pot = solver.phi_pot
+        phi_solved = solver.phi_solved
+        @inbounds @simd for k in eachindex(phi_pot, phi_solved)
+            phi_pot[k] = one_m_a * phi_pot[k] + alpha * phi_solved[k]
         end
     end
     solver.has_prev_solution = true

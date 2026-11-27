@@ -80,22 +80,27 @@ end
 Evaluate the analytic dipole magnetic field ``\\mathbf{B}_0(\\mathbf{x})`` at simulation
 position `x_sim` using `frame.center` and `frame.dipole_moment` (softened at `r_min`).
 """
-@inline function dipole_B0(
+@inline @muladd function dipole_B0(
         frame::DipoleFrame{FT}, x_sim::SVector{3, FT}; r_min::FT = eps(FT),
     ) where {FT <: AbstractFloat}
     dr = x_sim - frame.center
-    r = max(norm(dr), r_min)
-    inv_r3 = inv(r * r * r)
-    inv_r5 = inv_r3 / (r * r)
-    mdr = dot(frame.dipole_moment, dr)
-    return (FT(3) * mdr * inv_r5) * dr - inv_r3 * frame.dipole_moment
+    r2 = dr[1] * dr[1] + dr[2] * dr[2] + dr[3] * dr[3]
+    r = max(sqrt(r2), r_min)
+    inv_r = inv(r)
+    inv_r2 = inv_r * inv_r
+    inv_r3 = inv_r2 * inv_r
+    inv_r5 = inv_r3 * inv_r2
+    m = frame.dipole_moment
+    mdr = m[1] * dr[1] + m[2] * dr[2] + m[3] * dr[3]
+    return (FT(3) * mdr * inv_r5) * dr - inv_r3 * m
 end
 
-@inline function _map_dipole_smg_core(
+@inline @muladd function _map_dipole_smg_core(
         x_smg::SVector{3, FT}, r_map::FT, ::Val{ComputeJac},
     ) where {FT <: AbstractFloat, ComputeJac}
     x, y, z = x_smg[1], x_smg[2], x_smg[3]
-    r2 = x * x + y * y + z * z
+    rho2 = x * x + y * y
+    r2 = rho2 + z * z
     r = sqrt(r2)
     z3 = zero(SVector{3, FT})
     z_jac = zero(SMatrix{2, 3, FT, 6})
@@ -111,19 +116,22 @@ end
     ym = xy_ratio * y
     rho_map2 = xm * xm + ym * ym
     r_map2 = r_map * r_map
+    two_pi = FT(2 * pi)
 
     if rho_map2 > r_map2
         # Field line closes below r_map (L < r_map).
-        rho = sqrt(x * x + y * y)
+        rho = sqrt(rho2)
         if rho > zero(FT)
-            xm = (r_map / rho) * x
-            ym = (r_map / rho) * y
+            inv_rho_map = r_map / rho
+            xm = inv_rho_map * x
+            ym = inv_rho_map * y
         else
             xm = r_map
             ym = zero(FT)
         end
         x_map = SVector{3, FT}(xm, ym, zero(FT))
-        phi_map = mod(atan(ym, xm), FT(2 * pi))
+        a = atan(ym, xm)
+        phi_map = a < zero(FT) ? a + two_pi : (a == zero(FT) ? zero(FT) : a)
         return (0, x_map, FT(0.5 * pi), phi_map, z_jac)
     end
 
@@ -131,21 +139,24 @@ end
     x_map = SVector{3, FT}(xm, ym, zm)
     cos_th = clamp(zm / r_map, -one(FT), one(FT))
     theta_map = acos(cos_th)
-    phi_map = mod(atan(ym, xm), FT(2 * pi))
+    a = atan(ym, xm)
+    phi_map = a < zero(FT) ? a + two_pi : (a == zero(FT) ? zero(FT) : a)
 
     jac = z_jac
     if ComputeJac
-        rho2 = x * x + y * y
         rho = sqrt(rho2)
         rho_map = sqrt(rho_map2)
         if abs(zm) >= FT(1.0e-6) * r_map && rho >= FT(1.0e-8) * r
+            inv_r2 = inv(r2)
+            inv_rho2 = inv(rho2)
+            inv_zm = inv(zm)
             z_over_r = z / r
-            factor = -(FT(0.5) - FT(1.5) * z_over_r * z_over_r) / (zm * rho)
+            factor = -(FT(0.5) - FT(1.5) * z_over_r * z_over_r) * inv_zm / rho
             j00 = xm * factor
             j01 = ym * factor
-            j02 = -FT(1.5) * (rho_map / zm) * (z / r2)
-            j10 = -y / rho2
-            j11 = x / rho2
+            j02 = -FT(1.5) * (rho_map * inv_zm) * (z * inv_r2)
+            j10 = -y * inv_rho2
+            j11 = x * inv_rho2
             j12 = zero(FT)
             jac = SMatrix{2, 3, FT, 6}(j00, j10, j01, j11, j02, j12)
         end
@@ -182,6 +193,32 @@ Map SMG position `x_smg` along the dipole field line ``r = L\\sin^2\\theta`` to 
     return _map_dipole_smg_core(x_smg, r_map, Val(true))
 end
 
+@inline @muladd function _dipole_conductance_tensor_core(
+        sigma_P::FT,
+        sigma_H::FT,
+        cos_theta::FT,
+        sin_theta::FT,
+        dipole_sign::FT,
+        s0::FT,
+        use_dip_angle::Bool,
+    ) where {FT <: AbstractFloat}
+    hall_sign = -dipole_sign
+    if !use_dip_angle
+        hemi = abs(cos_theta) <= FT(1.0e-12) ? zero(FT) : (cos_theta > zero(FT) ? one(FT) : -one(FT))
+        return (sigma_P, hall_sign * hemi * sigma_H, sigma_P)
+    end
+    sn2 = sin_theta * sin_theta
+    cs2 = cos_theta * cos_theta
+    cs3 = one(FT) + FT(3) * cs2
+    cs4 = sqrt(cs3)
+    C = FT(4) * s0 * cs2 + sigma_P * sn2
+    inv_C = inv(C)
+    s_tt = (s0 * sigma_P * cs3) * inv_C
+    s_tp = hall_sign * (FT(2) * s0 * sigma_H * cos_theta * cs4) * inv_C
+    s_pp = sigma_P + (sigma_H * sigma_H * sn2) * inv_C
+    return (s_tt, s_tp, s_pp)
+end
+
 """
     dipole_conductance_tensor(
         sigma_P::FT,
@@ -210,21 +247,10 @@ finite parallel conductance ``\\Sigma_0``, equatorial Cowling enhancement in
         sigma_parallel::Union{Nothing, FT} = nothing,
         use_dip_angle::Bool = true,
     ) where {FT <: AbstractFloat}
-    hall_sign = -dipole_sign
-    if !use_dip_angle
-        hemi = abs(cos_theta) <= FT(1.0e-12) ? zero(FT) : (cos_theta > zero(FT) ? one(FT) : -one(FT))
-        return (sigma_P, hall_sign * hemi * sigma_H, sigma_P)
-    end
     s0 = sigma_parallel === nothing ? (sigma_0_ratio * sigma_P) : max(sigma_parallel, FT(10))
-    sn2 = sin_theta * sin_theta
-    cs2 = cos_theta * cos_theta
-    cs3 = one(FT) + FT(3) * cs2
-    cs4 = sqrt(cs3)
-    C = FT(4) * s0 * cs2 + sigma_P * sn2
-    s_tt = (s0 * sigma_P * cs3) / C
-    s_tp = hall_sign * (FT(2) * s0 * sigma_H * cos_theta * cs4) / C
-    s_pp = sigma_P + (sigma_H * sigma_H * sn2) / C
-    return (s_tt, s_tp, s_pp)
+    return _dipole_conductance_tensor_core(
+        sigma_P, sigma_H, cos_theta, sin_theta, dipole_sign, s0, use_dip_angle,
+    )
 end
 
 """
@@ -244,20 +270,19 @@ simulation coordinates `x_fac_sim` and `x_iono_sim`, unit outward radial vector
 `r_hat_iono`, dipole field magnitude `b_iono_mag` at `r_iono`, and outward dipole radial
 projection `br_over_b_iono = (B0_iono ⋅ r_hat_iono) / |B0_iono|`.
 """
-@inline function dipole_fac_sample_point(
+@inline @muladd function dipole_fac_sample_point(
         frame::DipoleFrame{FT}, theta_i::FT, phi::FT, r_fac::FT,
     ) where {FT <: AbstractFloat}
-    sin_i = sin(theta_i)
-    cos_i = cos(theta_i)
-    sin_f_sq = (r_fac / frame.r_iono) * sin_i * sin_i
+    sin_i, cos_i = sincos(theta_i)
+    r_i = frame.r_iono
+    sin_f_sq = (r_fac / r_i) * sin_i * sin_i
     z3 = zero(SVector{3, FT})
     if sin_f_sq >= one(FT)
         return (false, z3, z3, z3, zero(FT), zero(FT))
     end
     sin_f = sqrt(sin_f_sq)
     cos_f = copysign(sqrt(max(one(FT) - sin_f_sq, zero(FT))), cos_i)
-    cp = cos(phi)
-    sp = sin(phi)
+    sp, cp = sincos(phi)
 
     r_hat_fac_smg = SVector{3, FT}(sin_f * cp, sin_f * sp, cos_f)
     r_hat_iono_smg = SVector{3, FT}(sin_i * cp, sin_i * sp, cos_i)
@@ -267,12 +292,13 @@ projection `br_over_b_iono = (B0_iono ⋅ r_hat_iono) / |B0_iono|`.
     r_hat_iono_sim = rot_T * r_hat_iono_smg
 
     x_fac_sim = frame.center + r_fac * r_hat_fac_sim
-    x_iono_sim = frame.center + frame.r_iono * r_hat_iono_sim
+    x_iono_sim = frame.center + r_i * r_hat_iono_sim
 
     denom_i = sqrt(one(FT) + FT(3) * cos_i * cos_i)
-    r_i = frame.r_iono
-    b_iono_mag = (frame.M0 / (r_i * r_i * r_i)) * denom_i
-    br_over_b_iono = frame.dipole_sign * (FT(2) * cos_i) / denom_i
+    inv_denom = inv(denom_i)
+    inv_r_i = inv(r_i)
+    b_iono_mag = (frame.M0 * (inv_r_i * inv_r_i * inv_r_i)) * denom_i
+    br_over_b_iono = frame.dipole_sign * (FT(2) * cos_i) * inv_denom
 
     return (true, x_fac_sim, x_iono_sim, r_hat_iono_sim, b_iono_mag, br_over_b_iono)
 end
