@@ -11,5 +11,6 @@ docs/build/
 docs/node_modules/
 docs/package.json
 docs/package-lock.json
-docs/src/.vitepress/
+docs/src/.vitepress/cache/
+docs/src/.vitepress/dist/
 docs/src/assets/fleks_analytic_polar.png
