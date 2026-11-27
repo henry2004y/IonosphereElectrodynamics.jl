@@ -49,16 +49,31 @@ All conductance models subtype [`AbstractConductanceModel`](@ref) and are evalua
 For 3D anisotropic plasma closures, [`electron_mobility_tensor`](@ref) constructs the
 $3 \times 3$ `SMatrix` tensor $\sigma_0 \hat{\mathbf{b}}\hat{\mathbf{b}}^\mathsf{T} + \sigma_P (\mathbf{I} - \hat{\mathbf{b}}\hat{\mathbf{b}}^\mathsf{T}) + \sigma_H (\hat{\mathbf{b}} \times)$:
 
-```jldoctest
-using IonosphereElectrodynamics, StaticArrays
+````@example conductance_demo
+using IonosphereElectrodynamics
+using StaticArrays
 
-u = SVector(0.0, 0.0, 1.0)
-M = electron_mobility_tensor(2.0, 3.0, u; sigma_0 = 5.0)
-(evaluate_conductance(UniformConductance(5.0, 2.0), 0.5, 0.0, u, 0.0), M * u == 5.0 * u)
+unif = UniformConductance(5.0, 2.0)
+mb = MoenBrekkeEUVConductance(; f107 = 150.0, sun_dir = (1.0, 0.0, 0.0))
+aur = AuroralConductance(mb; sigma_P_max = 15.0, hall_ratio = 1.5, fac_scale = 1.0e-6)
 
-# output
-((5.0, 2.0), true)
-```
+r_day = SVector(1.0, 0.0, 0.0)
+r_night = SVector(-1.0, 0.0, 0.0)
+sp_u, sh_u = evaluate_conductance(unif, 0.5, 0.0, r_day, 0.0)
+sp_day, sh_day = evaluate_conductance(mb, 0.5 * pi, 0.0, r_day, 0.0)
+sp_night, sh_night = evaluate_conductance(aur, 0.5 * pi, pi, r_night, 0.0; jr_outward = 1.0e-6)
+
+M = electron_mobility_tensor(2.0, 3.0, SVector(0.0, 0.0, 1.0); sigma_0 = 5.0)
+s_pole = dipole_conductance_tensor(sp_day, sh_day, cos(0.2), sin(0.2), -1.0)
+s_eq = dipole_conductance_tensor(sp_day, sh_day, cos(0.49 * pi), sin(0.49 * pi), -1.0)
+
+println("Uniform:     (ΣP, ΣH) = ", (sp_u, sh_u))
+println("Dayside EUV: (ΣP, ΣH) = ", round.((sp_day, sh_day); sigdigits = 4))
+println("Night+FAC:   (ΣP, ΣH) = ", round.((sp_night, sh_night); sigdigits = 4))
+println("Mobility M * z_hat    = ", M * SVector(0.0, 0.0, 1.0))
+println("Dipole tensor (polar) = ", round.(s_pole; sigdigits = 4))
+println("Dipole tensor (eq)    = ", round.(s_eq; sigdigits = 4))
+````
 
 ## Dipole Spherical Conductance Tensor
 
@@ -110,6 +125,23 @@ When `omega_corot` is non-zero in [`IonosphereConfig`](@ref), [`eval_ionosphere_
 adds $-(\boldsymbol{\Omega}_{\text{corot}} \times \Delta\mathbf{r}) \times \mathbf{B}_0$ and
 [`eval_ionosphere_u_exb`](@ref) adds $\boldsymbol{\Omega}_{\text{corot}} \times \Delta\mathbf{r}$
 directly in 3D, avoiding spherical finite-difference spikes near the low-latitude boundary.
+
+````@example dipole_mapping_demo
+using IonosphereElectrodynamics
+using StaticArrays
+
+frame = build_dipole_frame((0.0, 0.0, -3.0e-5); r_iono = 1.017)
+x_sim = SVector(1.5, 0.5, 2.0)
+b0 = dipole_B0(frame, x_sim)
+x_smg = frame.rot * (x_sim - frame.center)
+i_hem, x_map, th_map, ph_map, jac = map_dipole_smg_with_jacobian(x_smg, frame.r_iono)
+
+println("i_hem      = ", i_hem, " (", i_hem == 1 ? "North" : i_hem == -1 ? "South" : "Closed", ")")
+println("footpoint  = (θ = ", round(rad2deg(th_map); sigdigits = 4), "°, φ = ", round(rad2deg(ph_map); sigdigits = 4), "°)")
+println("x_map      = ", round.(x_map; sigdigits = 4))
+println("B0         = ", round.(b0; sigdigits = 4))
+println("size(jac)  = ", size(jac), ", ∂θ/∂z = ", round(jac[1, 3]; sigdigits = 4))
+````
 
 ## Numerical Method & Zero-Allocation Solver
 

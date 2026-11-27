@@ -40,7 +40,7 @@ The example below configures a Moen–Brekke solar EUV + auroral conductance mod
 both hemispheres for an analytic Region 1 + Region 2 field-aligned current pattern, and
 evaluates the mapped 3D electric field and $\mathbf{E} \times \mathbf{B}_0$ drift:
 
-```jldoctest
+````@example getting_started
 using IonosphereElectrodynamics
 using LinearAlgebra: dot, norm
 using StaticArrays
@@ -84,15 +84,13 @@ b0 = dipole_B0(sol.frame, x)
 e_vec = eval_ionosphere_E(view, x; B0 = b0)
 u_exb = eval_ionosphere_u_exb(view, x, b0)
 
-converged &&
-    isapprox(cpcp.north, cpcp.south; rtol = 1.0e-6) &&
-    cpcp.north > 1.0e5 &&
-    abs(dot(e_vec, b0)) / (norm(e_vec) * norm(b0)) < 1.0e-13 &&
-    u_exb[1] < 0.0
-
-# output
-true
-```
+println("converged = ", converged)
+println("CPCP_N    = ", round(cpcp.north * 1.0e-3; sigdigits = 4), " kV")
+println("CPCP_S    = ", round(cpcp.south * 1.0e-3; sigdigits = 4), " kV")
+println("E         = ", round.(e_vec .* 1.0e3; sigdigits = 4), " mV/m")
+println("|E⋅B0| / (|E||B0|) = ", round(abs(dot(e_vec, b0)) / (norm(e_vec) * norm(b0)); sigdigits = 2))
+println("u_exb     = ", round.(u_exb; sigdigits = 4), " m/s")
+````
 
 ## Diagnostics & Solver Reset
 

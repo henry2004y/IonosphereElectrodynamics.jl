@@ -45,7 +45,7 @@ lines between the ionospheric shell and magnetospheric boundaries.
 
 ## Quick Example
 
-```julia
+````@example index_quick
 using IonosphereElectrodynamics
 using StaticArrays
 
@@ -79,7 +79,7 @@ jr = [
     end for i in 1:sol.n_theta, j in 1:sol.n_phi
 ]
 
-solve_ionosphere!(sol, jr)
+converged = solve_ionosphere!(sol, jr)
 cpcp = cross_polar_cap_potential(sol)
 
 view = ionosphere_field_view(sol)
@@ -87,5 +87,13 @@ x = SVector(0.0, 0.2 * r_planet, 3.0 * r_planet)
 b0 = dipole_B0(sol.frame, x)
 e_vec = eval_ionosphere_E(view, x; B0 = b0)
 u_exb = eval_ionosphere_u_exb(view, x, b0)
-```
+
+println("converged = ", converged)
+println(
+    "CPCP      = (north = ", round(cpcp.north * 1.0e-3; sigdigits = 4),
+    " kV, south = ", round(cpcp.south * 1.0e-3; sigdigits = 4), " kV)",
+)
+println("E         = ", round.(e_vec .* 1.0e3; sigdigits = 4), " mV/m")
+println("u_exb     = ", round.(u_exb; sigdigits = 4), " m/s")
+````
 
