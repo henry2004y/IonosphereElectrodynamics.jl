@@ -11,11 +11,11 @@
 #   - Left:   18 MLT (Dusk, +y, Φ < 0, upward R1 FAC)
 #
 # Usage:
-#   julia --project=<env-with-CairoMakie-and-LingXiaoIonosphere> \
+#   julia --project=<env-with-CairoMakie-and-Ionosphere> \
 #       examples/fleks_analytic_polar.jl [output_path.png]
 
 using CairoMakie
-using LingXiaoIonosphere
+using Ionosphere
 using Printf
 using StaticArrays
 
@@ -178,7 +178,7 @@ function run_fleks_analytic_polar(;
     fig = Figure(; size = (1650, 1020), fontsize = 14)
     Label(
         fig[0, 1:6],
-        "LingXiaoIonosphere.jl: Analytic R1+R2 FACs + Auroral/EUV Conductance (FLEKS Benchmark)";
+        "Ionosphere.jl: Analytic R1+R2 FACs + Auroral/EUV Conductance (FLEKS Benchmark)";
         fontsize = 18, font = :bold,
     )
 

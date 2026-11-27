@@ -1,4 +1,4 @@
-name = "LingXiaoIonosphere"
+name = "Ionosphere"
 uuid = "8a2b5c6d-3e4f-4a9b-8c5d-6e7f8a9b0c1d"
 authors = ["Hongyang Zhou <hyzhou@umich.edu> and contributors"]
 version = "0.1.0"

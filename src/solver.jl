@@ -1069,7 +1069,7 @@ function write_ionosphere_diagnostics(
     nt, np = solver.n_theta, solver.n_phi
     inv_r = one(FT) / solver.frame.r_iono
     open(filename, "w") do io
-        println(io, "# LingXiaoIonosphere Diagnostics")
+        println(io, "# Ionosphere Diagnostics")
         println(io, "# cycle = $cycle  time = $(Float64(time))  cpcpN = $(Float64(solver.cpcp_north))  cpcpS = $(Float64(solver.cpcp_south))")
         println(io, "# nTheta = $nt  nPhi = $np  rIono = $(Float64(solver.frame.r_iono))")
         println(io, "# theta_deg phi_deg Jr SigmaP SigmaH Phi Eth Eph")

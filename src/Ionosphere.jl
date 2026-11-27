@@ -1,13 +1,13 @@
 """
-    LingXiaoIonosphere
+    Ionosphere
 
-Standalone, zero-allocation 2D spherical magnetosphere–ionosphere (M–I) coupling solver
-for the LingXiaoPlasma ecosystem. Solves the height-integrated ionospheric potential
-equation ``\\nabla_h \\cdot (\\boldsymbol{\\Sigma} \\cdot \\nabla_h \\Phi) = J_r^{\\text{outward}}``
+Standalone, zero-allocation 2D spherical magnetosphere–ionosphere (M–I) coupling solver.
+Solves the height-integrated ionospheric potential equation
+``\\nabla_h \\cdot (\\boldsymbol{\\Sigma} \\cdot \\nabla_h \\Phi) = J_r^{\\text{outward}}``
 on both hemispheres in dipole SMG coordinates and maps potentials, electric fields, and
 ``\\mathbf{E}\\times\\mathbf{B}_0`` convection velocities along dipole field lines.
 """
-module LingXiaoIonosphere
+module Ionosphere
 
 using Adapt: Adapt
 using LinearAlgebra: cross, dot, norm
@@ -26,6 +26,7 @@ export AbstractConductanceModel,
     AuroralConductance,
     CustomConductance,
     evaluate_conductance,
+    electron_mobility_tensor,
     DipoleFrame,
     build_dipole_frame,
     dipole_B0,
@@ -61,7 +62,8 @@ export AbstractConductanceModel,
         b0 = dipole_B0(sol.frame, x)
         _ = eval_ionosphere_E(sol, x; B0 = b0)
         _ = eval_ionosphere_u_exb(sol, x, b0)
+        _ = electron_mobility_tensor(1.0, 0.5, SVector(0.0, 0.0, 1.0))
     end
 end
 
-end # module LingXiaoIonosphere
+end # module Ionosphere

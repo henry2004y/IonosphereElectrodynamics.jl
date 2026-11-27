@@ -1,13 +1,13 @@
 using LinearAlgebra: dot, norm
-using LingXiaoIonosphere
+using Ionosphere
 using LingXiaoTest: run_hygiene_checks, verify_api_coverage
-using StaticArrays: SVector
+using StaticArrays: SMatrix, SVector
 using Test
 
-@testset "LingXiaoIonosphere.jl" begin
+@testset "Ionosphere.jl" begin
     @testset "Package Hygiene & API Docstrings" begin
-        run_hygiene_checks(LingXiaoIonosphere)
-        cov = verify_api_coverage(LingXiaoIonosphere, pkgdir(LingXiaoIonosphere))
+        run_hygiene_checks(Ionosphere)
+        cov = verify_api_coverage(Ionosphere, pkgdir(Ionosphere))
         @test isempty(cov.missing_docstrings)
     end
 
@@ -60,7 +60,7 @@ using Test
         for j in 1:sol.n_phi, i in 1:sol.n_theta
             sol.phi_pot[i, j] = 5.0e4 * sin(sol.theta[i])^2 * sin(sol.phi[j])
         end
-        LingXiaoIonosphere._compute_gradients!(sol)
+        Ionosphere._compute_gradients!(sol)
 
         view = ionosphere_field_view(sol)
         r_body = 3.0
@@ -99,7 +99,7 @@ using Test
         for j in 1:sol.n_phi, i in 1:sol.n_theta
             sol.phi_pot[i, j] = 1.0e4 * sin(sol.theta[i]) * sin(sol.phi[j])
         end
-        LingXiaoIonosphere._compute_gradients!(sol)
+        Ionosphere._compute_gradients!(sol)
         x_pole_N = ctr + r_body * (transpose(sol.frame.rot) * SVector(0.0, 0.0, 1.0))
         e_pole = eval_ionosphere_E(sol, x_pole_N)
         b_pole = dipole_B0(sol.frame, x_pole_N)
@@ -447,5 +447,17 @@ using Test
             end
             @test max_ortho_3d < 1.0e-13
         end
+    end
+
+    @testset "Electron Mobility Tensor" begin
+        b_z = SVector(0.0, 0.0, 1.0)
+        M = electron_mobility_tensor(2.0, 3.0, b_z; sigma_0 = 5.0)
+        @test M ≈ SMatrix{3, 3, Float64}(
+            2.0, 3.0, 0.0,
+            -3.0, 2.0, 0.0,
+            0.0, 0.0, 5.0,
+        )
+        @test M * b_z ≈ 5.0 * b_z
+        @test (@allocated electron_mobility_tensor(2.0, 3.0, b_z; sigma_0 = 5.0)) == 0
     end
 end

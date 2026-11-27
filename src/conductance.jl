@@ -275,3 +275,27 @@ end
         throw(ArgumentError("CustomConductance returned non-finite sigma_H = $sh"))
     return (sp_f, sh_f)
 end
+
+"""
+    electron_mobility_tensor(sigma_p::Real, sigma_h::Real, b_hat::SVector{3,<:Real}; sigma_0::Real = sigma_p) -> SMatrix{3,3}
+
+Construct the anisotropic 3D conductance/mobility tensor
+`sigma_0 b bᵀ + sigma_p (I - b bᵀ) + sigma_h (b ×)`.
+"""
+@inline function electron_mobility_tensor(
+        sigma_p::Real,
+        sigma_h::Real,
+        b_hat::SVector{3, FT};
+        sigma_0::Real = sigma_p,
+    ) where {FT <: AbstractFloat}
+    bx, by, bz = b_hat[1], b_hat[2], b_hat[3]
+    sp = FT(sigma_p)
+    sh = FT(sigma_h)
+    s0 = FT(sigma_0)
+    ds = s0 - sp
+    return SMatrix{3, 3, FT}(
+        sp + ds * bx * bx, ds * bx * by + sh * bz, ds * bx * bz - sh * by,
+        ds * by * bx - sh * bz, sp + ds * by * by, ds * by * bz + sh * bx,
+        ds * bz * bx + sh * by, ds * bz * by - sh * bx, sp + ds * bz * bz,
+    )
+end
