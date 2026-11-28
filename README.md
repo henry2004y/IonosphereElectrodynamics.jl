@@ -7,22 +7,26 @@
 [![Aqua QA](https://raw.githubusercontent.com/JuliaTesting/Aqua.jl/master/badge.svg)](https://github.com/JuliaTesting/Aqua.jl)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Standalone, zero-allocation 2D spherical magnetosphere–ionosphere (M–I) electrostatic coupling solver for space plasma simulations.
+Standalone, pure-Julia 2D spherical magnetosphere–ionosphere (M–I) electrostatic coupling solver for space plasma simulations.
 
 Solves the height-integrated ionospheric Ohm's law on both hemispheres in dipole Solar Magnetic (SMG) coordinates:
 
-$$\nabla_h \cdot (\boldsymbol{\Sigma} \cdot \nabla_h \Phi) = J_r^{\text{outward}}$$
+$$
+\nabla_h \cdot (\boldsymbol{\Sigma} \cdot \nabla_h \Phi) = J_r^{\text{outward}}
+$$
 
-using a 5-point spherical finite-difference stencil and pre-allocated ILU(0)-preconditioned BiCGSTAB with zero steady-state heap allocations, then maps potentials, electric fields ($\mathbf{E} \cdot \mathbf{B}_0 \equiv 0$), and $\mathbf{E} \times \mathbf{B}_0$ convection velocities along analytic dipole field lines.
+using a 5-point spherical finite-difference stencil and pre-allocated wavefront SIMD ILU(0)-preconditioned BiCGSTAB with zero steady-state heap allocations, then maps potentials, electric fields ($\mathbf{E} \cdot \mathbf{B}_0 \equiv 0$), and $\mathbf{E} \times \mathbf{B}_0$ convection velocities along analytic dipole field lines.
 
 ## Key Features
 
-- **Conductance & Mobility Models**: `UniformConductance`, `SolarEUVConductance`, `MoenBrekkeEUVConductance` ($F_{10.7}$-driven solar EUV), `AuroralConductance` (dynamic upward-FAC precipitation wrapper), `CustomConductance` callbacks, and anisotropic 3D `electron_mobility_tensor`.
-- **Dipole SMG Frame & Analytic Mapping**: `DipoleFrame` (`build_dipole_frame`) with arbitrary dipole tilt and offset center, analytic `dipole_B0`, closed-form field-line mapping and exact $2 \times 3$ Jacobian (`map_dipole_smg`, `map_dipole_smg_with_jacobian`), equatorial Cowling enhancement (`dipole_conductance_tensor`), and FAC shell mapping (`dipole_fac_sample_point`).
-- **Zero-Allocation Hemispheric Solver**: Pre-allocated `IonosphereSolver` (`solve_ionosphere!`, `reset_ionosphere!`) supporting Dirichlet and Neumann low-latitude boundary conditions, FAC neutralization/smoothing, planetary corotation (`omega_corot`), cross-polar-cap potential (`cross_polar_cap_potential`), and FLEKS-compatible ASCII diagnostics (`write_ionosphere_diagnostics`).
-- **GPU/`Adapt`-Friendly 3D Field Views**: Lightweight `IonosphereFieldView` (`ionosphere_field_view`) supporting `eval_ionosphere_E` and `eval_ionosphere_u_exb` with smooth $m = 1$ polar-axis regularity at $\rho = 0$ and optional corotation electric fields.
+- **Conductance & Mobility Models**: Uniform, cosine solar-EUV, $F_{10.7}$-driven Moen–Brekke EUV, dynamic upward-FAC auroral precipitation (`:tanh_sqrt` and `:saturating`), custom callbacks, and 3D anisotropic electron mobility tensors.
+- **Dipole SMG Frame & Analytic Mapping**: Arbitrary dipole tilt and offset center in Solar Magnetic (SMG) coordinates, analytic dipole $\mathbf{B}_0$, closed-form field-line mapping with exact $2 \times 3$ Jacobian ($\mathbf{E} \cdot \mathbf{B}_0 \equiv 0$), Goodman/Ridley equatorial Cowling conductance tensors, and FAC extraction-shell mapping.
+- **Zero-Allocation Hemispheric Solver**: Pre-allocated 5-point spherical solver with wavefront-reordered SIMD ILU(0)-BiCGSTAB (`Float64` and `Float32`), Dirichlet or Neumann low-latitude boundary conditions, FAC smoothing/neutralization, planetary corotation, cross-polar-cap potential, and FLEKS-compatible ASCII diagnostics.
+- **GPU/`Adapt`-Friendly 3D Field Views**: Lightweight `isbits`-compatible views (`Adapt.jl`) for evaluating mapped electric fields and $\mathbf{E} \times \mathbf{B}_0$ convection velocities on CPU or GPU with smooth $m = 1$ polar-axis regularity and corotation.
 
 ## Installation
+
+`IonosphereElectrodynamics.jl` requires Julia 1.11 or later. Install from the Julia REPL:
 
 ```julia
 using Pkg
@@ -33,7 +37,7 @@ Or for local development:
 
 ```julia
 using Pkg
-Pkg.develop(path = "/path/to/IonosphereElectrodynamics.jl")
+Pkg.develop(; path = "/path/to/IonosphereElectrodynamics.jl")
 ```
 
 ## Quick Start
@@ -88,32 +92,30 @@ u_exb = eval_ionosphere_u_exb(view, x, b0)
 
 ## Examples
 
-- [`examples/fleks_analytic_polar.jl`](examples/fleks_analytic_polar.jl): Reproduces the 6-panel FLEKS analytic Region 1 + Region 2 Birkeland current benchmark with Moen–Brekke EUV + Auroral conductance (`CPCP ≈ 128.2 kV`, requires `CairoMakie`):
+[`examples/fleks_analytic_polar.jl`](examples/fleks_analytic_polar.jl) reproduces the 6-panel FLEKS analytic Region 1 + Region 2 Birkeland current benchmark with Moen–Brekke EUV + auroral conductance (`CPCP ≈ 128.2 kV`, using `CairoMakie` via the `docs` environment):
 
 ```bash
-julia --project=/path/to/env-with-CairoMakie examples/fleks_analytic_polar.jl
+julia --project=docs -e 'using Pkg; Pkg.instantiate()'
+julia --project=docs examples/fleks_analytic_polar.jl
 ```
 
-## Public API
+## Documentation
 
-- **Conductance & mobility models**: `AbstractConductanceModel`, `UniformConductance`, `SolarEUVConductance`, `MoenBrekkeEUVConductance`, `AuroralConductance`, `CustomConductance`, `evaluate_conductance`, `electron_mobility_tensor`.
-- **Dipole frame & mapping**: `DipoleFrame`, `build_dipole_frame`, `dipole_B0`, `map_dipole_smg`, `map_dipole_smg_with_jacobian`, `dipole_conductance_tensor`, `dipole_fac_sample_point`.
-- **Solver & configuration**: `IonosphereConfig`, `IonosphereSolver`, `solve_ionosphere!`, `reset_ionosphere!`, `cross_polar_cap_potential`, `write_ionosphere_diagnostics`.
-- **3D field/velocity evaluation (`Adapt`-friendly)**: `IonosphereFieldView`, `ionosphere_field_view`, `eval_ionosphere_E`, `eval_ionosphere_u_exb`.
+See the [stable](https://henry2004y.github.io/IonosphereElectrodynamics.jl/stable) or [dev](https://henry2004y.github.io/IonosphereElectrodynamics.jl/dev) documentation for coordinate and sign conventions, mathematical formulation, two-way coupling and GPU/`Float32` usage, and the full API reference.
 
 ## Testing & Benchmarking
 
-Run the unit, convergence, and `Aqua.jl` / `ExplicitImports.jl` quality test suite:
+Run the unit, convergence, and `Aqua.jl` / `ExplicitImports.jl` test suite from the repository root:
 
 ```bash
-julia --project=IonosphereElectrodynamics.jl -e 'using Pkg; Pkg.test()'
+julia --project=. -e 'using Pkg; Pkg.test()'
 ```
 
 Benchmarks are defined in [`benchmark/benchmarks.jl`](benchmark/benchmarks.jl) using `BenchmarkTools.jl` and tracked across revisions with [`AirspeedVelocity.jl`](https://github.com/MilesCranmer/AirspeedVelocity.jl):
 
 ```bash
 # Compare the current working tree against main using the AirspeedVelocity CLI
-cd IonosphereElectrodynamics.jl && benchpkg IonosphereElectrodynamics --rev=main,dirty
+benchpkg IonosphereElectrodynamics --rev=main,dirty
 ```
 
 Or from Julia:
@@ -121,7 +123,11 @@ Or from Julia:
 ```julia
 using AirspeedVelocity
 
-AirspeedVelocity.benchmark("IonosphereElectrodynamics", ["main", "dirty"]; path = "/path/to/IonosphereElectrodynamics.jl")
+AirspeedVelocity.benchmark(
+    "IonosphereElectrodynamics",
+    ["main", "dirty"];
+    path = "/path/to/IonosphereElectrodynamics.jl",
+)
 ```
 
 ## License

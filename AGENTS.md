@@ -1,4 +1,4 @@
-See [README.md](./README.md) for the package overview and public API, [docs/src/getting_started.md](./docs/src/getting_started.md) for coordinate/sign conventions and walkthroughs, and [docs/src/formulation.md](./docs/src/formulation.md) for equations and numerical details.
+See [README.md](./README.md) for the package overview, [docs/src/api.md](./docs/src/api.md) for the public API, [docs/src/getting_started.md](./docs/src/getting_started.md) for coordinate/sign conventions and walkthroughs, and [docs/src/formulation.md](./docs/src/formulation.md) for equations and numerical details.
 
 # Code, invariants, and commits
 - Format Julia code with [Runic.jl](https://github.com/fredrikekre/Runic.jl) (checked by [`.github/workflows/Format.yml`](./.github/workflows/Format.yml)), keeping lines within 92 characters.
