@@ -10,10 +10,20 @@ MuladdMacro = "46d2c3a1-f734-5fdb-9937-b9b9aeba4221"
 PrecompileTools = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 
+[weakdeps]
+ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
+ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
+
+[extensions]
+IonosphereElectrodynamicsChainRulesCoreExt = "ChainRulesCore"
+IonosphereElectrodynamicsForwardDiffExt = "ForwardDiff"
+
 [compat]
 Adapt = "4"
 Aqua = "0.8"
+ChainRulesCore = "1"
 ExplicitImports = "1"
+ForwardDiff = "0.10, 1"
 LinearAlgebra = "1"
 MuladdMacro = "0.2"
 PrecompileTools = "1"
@@ -22,8 +32,10 @@ julia = "1.11"
 
 [extras]
 Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
+ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
 ExplicitImports = "7d51a73a-1435-4ff3-83d9-f097790105c7"
+ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["Test", "Aqua", "ExplicitImports"]
+test = ["Test", "Aqua", "ExplicitImports", "ForwardDiff", "ChainRulesCore"]

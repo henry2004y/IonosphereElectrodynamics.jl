@@ -1,5 +1,8 @@
+using Adapt: Adapt
 using Aqua: Aqua
+using ChainRulesCore: ChainRulesCore, NoTangent, Tangent, ZeroTangent, frule, rrule
 using ExplicitImports: check_no_implicit_imports, check_no_stale_explicit_imports
+using ForwardDiff: ForwardDiff
 using LinearAlgebra: dot, norm
 using IonosphereElectrodynamics
 using StaticArrays: SMatrix, SVector
@@ -20,6 +23,46 @@ function _alloc_mobility_tensor(sp, sh, b_hat, s0)
     return @allocated electron_mobility_tensor(sp, sh, b_hat; sigma_0 = s0)
 end
 
+function _alloc_bicgstab_transpose(op, ws, tol, max_iter)
+    fill!(ws.x, zero(eltype(ws.x)))
+    IonosphereElectrodynamics._solve_bicgstab!(op, ws, tol, max_iter, Val(true))
+    fill!(ws.x, zero(eltype(ws.x)))
+    return @allocated IonosphereElectrodynamics._solve_bicgstab!(
+        op, ws, tol, max_iter, Val(true),
+    )
+end
+
+function _fd_grad(f, x::AbstractVector{Float64}; h::Float64 = 1.0e-6)
+    g = similar(x)
+    xp = copy(x)
+    xm = copy(x)
+    for i in eachindex(x)
+        hi = x[i] == 0.0 ? h : h * abs(x[i])
+        xp[i] = x[i] + hi
+        xm[i] = x[i] - hi
+        g[i] = (f(xp) - f(xm)) / (2 * hi)
+        xp[i] = x[i]
+        xm[i] = x[i]
+    end
+    return g
+end
+
+function _fd_jac(f, x::AbstractVector{Float64}; h::Float64 = 1.0e-6)
+    y0 = f(x)
+    J = Matrix{Float64}(undef, length(y0), length(x))
+    xp = copy(x)
+    xm = copy(x)
+    for j in eachindex(x)
+        hj = x[j] == 0.0 ? h : h * abs(x[j])
+        xp[j] = x[j] + hj
+        xm[j] = x[j] - hj
+        J[:, j] .= (f(xp) .- f(xm)) ./ (2 * hj)
+        xp[j] = x[j]
+        xm[j] = x[j]
+    end
+    return J
+end
+
 @testset "IonosphereElectrodynamics.jl" begin
     @testset "Package Hygiene, Aqua.jl & API Docstrings" begin
         Aqua.test_all(
@@ -31,6 +74,15 @@ end
         )
         @test check_no_implicit_imports(IonosphereElectrodynamics; skip = (Base, Core)) === nothing
         @test check_no_stale_explicit_imports(IonosphereElectrodynamics) === nothing
+        for ext_sym in (
+                :IonosphereElectrodynamicsForwardDiffExt,
+                :IonosphereElectrodynamicsChainRulesCoreExt,
+            )
+            ext = Base.get_extension(IonosphereElectrodynamics, ext_sym)
+            @test ext !== nothing
+            @test check_no_implicit_imports(ext; skip = (Base, Core)) === nothing
+            @test check_no_stale_explicit_imports(ext) === nothing
+        end
         docs_meta = Base.Docs.meta(IonosphereElectrodynamics)
         missing_docstrings = [
             s for s in names(IonosphereElectrodynamics) if
@@ -598,5 +650,469 @@ end
         @test sol.cpcp_south == 0.0
         @test sol.last_iters_north == 0
         @test sol.last_iters_south == 0
+    end
+
+    @testset "Generic Numeric Types (BigFloat, Float16, Auto-Inferred FT & Mixed Inputs)" begin
+        # Auto-inferred FT in constructors
+        @test UniformConductance(5.0f0) isa UniformConductance{Float32}
+        @test UniformConductance(5.0f0, 2.0f0) isa UniformConductance{Float32}
+        @test UniformConductance(5, 2) isa UniformConductance{Float64}
+        @test SolarEUVConductance(; sigma_P_day = 8.0f0) isa SolarEUVConductance{Float32}
+        @test MoenBrekkeEUVConductance(; f107 = 150.0f0) isa MoenBrekkeEUVConductance{Float32}
+        @test AuroralConductance(SolarEUVConductance(; FT = Float32)) isa
+            AuroralConductance{Float32, SolarEUVConductance{Float32}}
+        @test build_dipole_frame((0.0f0, 0.0f0, -3.0f-5)) isa DipoleFrame{Float32}
+        @test IonosphereConfig(; tol = 1.0f-5) isa IonosphereConfig{Float32}
+        @test IonosphereConfig(; conductance = SolarEUVConductance(; FT = Float32)) isa
+            IonosphereConfig{Float32}
+
+        # Mixed-type & AbstractVector / NTuple inputs
+        frame64 = build_dipole_frame((0.0, 0.0, -3.0e-5); r_iono = 1.017)
+        @test isbits(frame64)
+        b_vec = @inferred dipole_B0(frame64, [0.5, 0.4, 1.5])
+        b_tup = @inferred dipole_B0(frame64, (0.5f0, 0.4f0, 1.5f0))
+        b_sv = dipole_B0(frame64, SVector(0.5, 0.4, 1.5))
+        @test b_vec ≈ b_sv
+        @test b_tup ≈ b_sv rtol = 1.0e-6
+
+        M_vec = electron_mobility_tensor(2.0f0, 3.0, [0.0, 0.0, 1.0]; sigma_0 = 5)
+        @test M_vec isa SMatrix{3, 3, Float64, 9}
+        @test M_vec * SVector(0.0, 0.0, 1.0) ≈ SVector(0.0, 0.0, 5.0)
+
+        # Adapt.adapt round-trip preserves isbits fields
+        cfg_adp = IonosphereConfig(; n_theta_hem = 9, n_phi = 16, FT = Float32)
+        sol_adp = IonosphereSolver(cfg_adp; r_iono = 1.0f0, dipole_moment = (0.0f0, 0.0f0, -5.0f0))
+        jr_adp = [1.0f-6 * sin(sol_adp.theta[i]) * sin(sol_adp.phi[j]) for i in 1:sol_adp.n_theta, j in 1:sol_adp.n_phi]
+        @test solve_ionosphere!(sol_adp, jr_adp)
+        vf_adp = Adapt.adapt(Array, ionosphere_field_view(sol_adp))
+        @test vf_adp isa IonosphereFieldView{Float32, Matrix{Float32}}
+        @test isbits(vf_adp.frame)
+
+        # BigFloat end-to-end high-precision test
+        cond_bf = AuroralConductance(
+            MoenBrekkeEUVConductance(; f107 = BigFloat(150), sun_dir = (BigFloat(1), BigFloat(0), BigFloat(0)));
+            sigma_P_max = BigFloat(15), hall_ratio = BigFloat(1.5), fac_scale = BigFloat(1.0e-6),
+        )
+        cfg_bf = IonosphereConfig(
+            ;
+            n_theta_hem = 7, n_phi = 12, conductance = cond_bf,
+            tol = BigFloat(1.0e-25), max_iter = 500,
+        )
+        sol_bf = IonosphereSolver(cfg_bf; r_iono = BigFloat(1.017), dipole_moment = (BigFloat(0), BigFloat(0), BigFloat(-5)))
+        @test sol_bf isa IonosphereSolver{BigFloat}
+        jr_bf = [BigFloat(1.0e-6) * sin(sol_bf.theta[i]) * sin(sol_bf.phi[j]) for i in 1:sol_bf.n_theta, j in 1:sol_bf.n_phi]
+        @test solve_ionosphere!(sol_bf, jr_bf)
+        @test sol_bf.last_resid_north < BigFloat(1.0e-24)
+        x_bf = SVector(BigFloat(0.6), BigFloat(0.4), BigFloat(2.0))
+        b_bf = dipole_B0(sol_bf.frame, x_bf)
+        e_bf = eval_ionosphere_E(sol_bf, x_bf; B0 = b_bf)
+        u_bf = eval_ionosphere_u_exb(sol_bf, x_bf, b_bf)
+        @test e_bf isa SVector{3, BigFloat}
+        @test u_bf isa SVector{3, BigFloat}
+        @test abs(dot(e_bf, b_bf)) / (norm(e_bf) * norm(b_bf)) < BigFloat(1.0e-60)
+
+        # Float16 smoke test (no underflow / NaN in tiny tolerances)
+        cfg16 = IonosphereConfig(
+            ;
+            n_theta_hem = 7, n_phi = 12,
+            conductance = UniformConductance(Float16(5.0), Float16(1.0)),
+            tol = Float16(1.0e-2), max_iter = 200, FT = Float16,
+        )
+        sol16 = IonosphereSolver(cfg16; r_iono = Float16(1.0), dipole_moment = (Float16(0), Float16(0), Float16(-5)))
+        jr16 = [Float16(0.1) * sin(sol16.theta[i]) * sin(sol16.phi[j]) for i in 1:sol16.n_theta, j in 1:sol16.n_phi]
+        @test solve_ionosphere!(sol16, jr16)
+        @test all(isfinite, sol16.phi_pot)
+        x16 = SVector(Float16(0.5), Float16(0.4), Float16(1.5))
+        b16 = dipole_B0(sol16.frame, x16)
+        @test all(isfinite, eval_ionosphere_E(sol16, x16; B0 = b16))
+        @test all(isfinite, eval_ionosphere_u_exb(sol16, x16, b16))
+    end
+
+    @testset "ForwardDiff AD: Pointwise Conductance, Dipole & 3D Field Evaluation" begin
+        # 1. Conductance models (including nightside sigma_H_night == 0 NaN check)
+        r_day = [0.6, 0.2, sqrt(1.0 - 0.4)]
+        r_ngt = [-0.6, 0.2, sqrt(1.0 - 0.4)]
+
+        f_unif(p) = collect(evaluate_conductance(UniformConductance(p[1], p[2]), 0.5, 0.3, r_day, 0.0))
+        @test ForwardDiff.jacobian(f_unif, [5.0, 2.0]) ≈ [1.0 0.0; 0.0 1.0]
+
+        f_euv_day(p) = collect(
+            evaluate_conductance(
+                SolarEUVConductance(; sigma_P_day = p[1], sigma_H_day = p[2], sigma_P_night = p[3], sigma_H_night = p[4], exponent = p[5], sun_dir = (1.0, 0.0, 0.0)),
+                0.5, 0.3, r_day, 0.0,
+            ),
+        )
+        p_euv = [8.0, 12.0, 2.0, 0.5, 0.6]
+        @test ForwardDiff.jacobian(f_euv_day, p_euv) ≈ _fd_jac(f_euv_day, p_euv) rtol = 1.0e-7
+
+        # Nightside with sigma_H_night == 0 must produce finite (zero) derivatives, no NaN
+        f_euv_ngt(p) = collect(
+            evaluate_conductance(
+                SolarEUVConductance(; sigma_P_day = p[1], sigma_H_day = p[2], sigma_P_night = p[3], sigma_H_night = 0.0, sun_dir = (1.0, 0.0, 0.0)),
+                0.5, 0.3, r_ngt, 0.0,
+            ),
+        )
+        J_ngt = ForwardDiff.jacobian(f_euv_ngt, [8.0, 12.0, 2.0])
+        @test all(isfinite, J_ngt)
+        @test J_ngt ≈ [0.0 0.0 1.0; 0.0 0.0 0.0]
+
+        f_mb(p) = collect(
+            evaluate_conductance(
+                MoenBrekkeEUVConductance(; f107 = p[1], sigma_P_night = p[2], sigma_H_night = p[3], sun_dir = (1.0, 0.0, 0.0)),
+                0.5, 0.3, SVector(p[4], p[5], sqrt(1.0 - p[4]^2 - p[5]^2)), 0.0,
+            ),
+        )
+        p_mb = [150.0, 3.0, 2.0, 0.6, 0.2]
+        @test ForwardDiff.jacobian(f_mb, p_mb) ≈ _fd_jac(f_mb, p_mb) rtol = 1.0e-7
+
+        for mode in (:tanh_sqrt, :saturating)
+            f_aur(p) = collect(
+                evaluate_conductance(
+                    AuroralConductance(
+                        MoenBrekkeEUVConductance(; f107 = p[1], sun_dir = (1.0, 0.0, 0.0));
+                        sigma_P_max = p[2], hall_ratio = p[3], fac_scale = p[4], mode = mode,
+                    ),
+                    0.5, 0.3, r_day, 0.0; jr_outward = p[5],
+                ),
+            )
+            p_aur = [140.0, 15.0, 1.5, 1.0e-6, 1.3e-6]
+            @test ForwardDiff.jacobian(f_aur, p_aur) ≈ _fd_jac(f_aur, p_aur) rtol = 1.0e-7
+        end
+
+        f_cust(p) = collect(
+            evaluate_conductance(
+                CustomConductance((th, ph, t) -> (3.0 + p[1] * sin(th) + t, 1.0 + p[2] * cos(ph))),
+                p[3], p[4], r_day, p[5],
+            ),
+        )
+        p_cust = [2.0, 1.5, 0.7, 1.1, 0.4]
+        @test ForwardDiff.jacobian(f_cust, p_cust) ≈ _fd_jac(f_cust, p_cust) rtol = 1.0e-7
+
+        # 2. Electron mobility tensor
+        f_mob(p) = vec(electron_mobility_tensor(p[1], p[2], p[4:6]; sigma_0 = p[3]))
+        p_mob = [2.0, 3.0, 10.0, 0.2, -0.3, sqrt(1.0 - 0.13)]
+        @test ForwardDiff.jacobian(f_mob, p_mob) ≈ _fd_jac(f_mob, p_mob) rtol = 1.0e-7
+
+        # 3. DipoleFrame & dipole_B0 (including center softening: zero NaN)
+        f_b0(p) = collect(dipole_B0(build_dipole_frame(p[1:3]; center = p[4:6], r_iono = 1.0), p[7:9]))
+        p_b0 = [0.2, -0.3, -3.0, 0.1, -0.2, 0.05, 1.2, 0.8, 2.0]
+        @test ForwardDiff.jacobian(f_b0, p_b0) ≈ _fd_jac(f_b0, p_b0) rtol = 1.0e-7
+        frame_c = build_dipole_frame((0.0, 0.0, -3.0); center = (0.1, -0.2, 0.05))
+        J_center = ForwardDiff.jacobian(x -> collect(dipole_B0(frame_c, x)), [0.1, -0.2, 0.05])
+        @test all(isfinite, J_center)
+
+        # 4. map_dipole_smg & map_dipole_smg_with_jacobian (including y = 0, x > 0 and pole)
+        for x0 in ([1.2, 0.8, 2.0], [1.5, 0.0, 2.0], [-1.2, 0.5, -2.1])
+            _, _, _, _, jac_exact = map_dipole_smg_with_jacobian(SVector{3}(x0), 1.017)
+            jac_ad = ForwardDiff.jacobian(x -> collect(map_dipole_smg(x, 1.017)[3:4]), x0)
+            @test jac_ad ≈ Matrix(jac_exact) atol = 1.0e-12 rtol = 1.0e-12
+        end
+        # Regression check specifically for atan(-0.0) derivative preservation at y = 0, x > 0
+        g_phi_y0 = ForwardDiff.gradient(x -> map_dipole_smg(x, 1.0)[4], [1.5, 0.0, 2.0])
+        @test g_phi_y0 ≈ [0.0, 1.0 / 1.5, 0.0] atol = 1.0e-14
+        # Pole must not produce NaN in map_dipole_smg_with_jacobian
+        J_map_pole = ForwardDiff.jacobian(
+            x -> collect(map_dipole_smg_with_jacobian(x, 1.0)[2]), [0.0, 0.0, 2.5],
+        )
+        @test all(isfinite, J_map_pole)
+
+        # 5. dipole_conductance_tensor
+        for (use_dip, s_par) in ((true, nothing), (true, 1000.0), (false, nothing))
+            f_dct(p) = collect(
+                dipole_conductance_tensor(
+                    p[1], p[2], cos(p[3]), sin(p[3]), -1.0;
+                    sigma_parallel = s_par, use_dip_angle = use_dip,
+                ),
+            )
+            p_dct = [5.0, 10.0, 0.45]
+            @test ForwardDiff.jacobian(f_dct, p_dct) ≈ _fd_jac(f_dct, p_dct) rtol = 1.0e-7
+        end
+
+        # 6. dipole_fac_sample_point (off-pole and exact north pole)
+        f_fac(p) = let (_, xf, xi, rh, bm, br) = dipole_fac_sample_point(frame_c, p[1], p[2], p[3])
+            vcat(collect(xf), collect(xi), collect(rh), bm, br)
+        end
+        p_fac = [0.35, 1.1, 2.5]
+        @test ForwardDiff.jacobian(f_fac, p_fac) ≈ _fd_jac(f_fac, p_fac) rtol = 1.0e-7
+        J_fac_pole = ForwardDiff.jacobian(f_fac, [0.0, 1.1, 2.5])
+        @test all(isfinite, J_fac_pole)
+
+        # 7. eval_ionosphere_E & eval_ionosphere_u_exb (off-pole, on-pole, capped, and u == 0)
+        cfg_m = IonosphereConfig(
+            ;
+            n_theta_hem = 25, n_phi = 48,
+            conductance = UniformConductance(5.0, 2.0),
+            omega_corot = (0.05, -0.02, 0.1), u_max = 100.0,
+        )
+        sol_m = IonosphereSolver(cfg_m; r_iono = 1.0, dipole_moment = (0.0, 0.0, -5.0))
+        jr_m = [1.0e-3 * sin(sol_m.theta[i])^2 * sin(sol_m.phi[j]) for i in 1:sol_m.n_theta, j in 1:sol_m.n_phi]
+        @test solve_ionosphere!(sol_m, jr_m)
+        vf_m = ionosphere_field_view(sol_m)
+
+        f_E(x) = collect(eval_ionosphere_E(vf_m, x; B0 = dipole_B0(vf_m.frame, x)))
+        f_u(x) = collect(eval_ionosphere_u_exb(vf_m, x, dipole_B0(vf_m.frame, x)))
+        f_u_cap(p) = collect(eval_ionosphere_u_exb(vf_m, p[1:3], dipole_B0(vf_m.frame, p[1:3]); u_max = p[4]))
+
+        x_off = [0.7, 0.5, 2.1]
+        @test ForwardDiff.jacobian(f_E, x_off) ≈ _fd_jac(f_E, x_off) rtol = 1.0e-6
+        @test ForwardDiff.jacobian(f_u, x_off) ≈ _fd_jac(f_u, x_off) rtol = 1.0e-6
+        u_mag = norm(eval_ionosphere_u_exb(vf_m, x_off, dipole_B0(vf_m.frame, x_off)))
+        p_cap = vcat(x_off, 0.5 * u_mag)
+        @test ForwardDiff.jacobian(f_u_cap, p_cap) ≈ _fd_jac(f_u_cap, p_cap) rtol = 1.0e-6
+
+        # Exact pole: finite derivatives, zero NaN
+        J_E_pole = ForwardDiff.jacobian(f_E, [0.0, 0.0, 2.5])
+        J_u_pole = ForwardDiff.jacobian(f_u, [0.0, 0.0, 2.5])
+        @test all(isfinite, J_E_pole)
+        @test all(isfinite, J_u_pole)
+
+        # Zero velocity (Jr = 0, omega_corot = 0): zero NaN in eval_ionosphere_u_exb
+        cfg_zero = IonosphereConfig(; n_theta_hem = 9, n_phi = 16, u_max = 1.0)
+        sol_zero = IonosphereSolver(cfg_zero; r_iono = 1.0, dipole_moment = (0.0, 0.0, -5.0))
+        vf_zero = ionosphere_field_view(sol_zero)
+        J_u_zero = ForwardDiff.jacobian(
+            x -> collect(eval_ionosphere_u_exb(vf_zero, x, dipole_B0(vf_zero.frame, x); u_max = 1.0)),
+            x_off,
+        )
+        @test all(isfinite, J_u_zero)
+        @test iszero(J_u_zero)
+    end
+
+    @testset "Exact Transpose Operator A^T, ILU(0)^T & 0 B Adjoint Solve" begin
+        for (nth_hem, np, lat_b, bc, cond) in (
+                (9, 16, 20.0, :dirichlet, UniformConductance(5.0, 8.0)),
+                (9, 16, 20.0, :neumann, SolarEUVConductance(; sun_dir = (1.0, 0.0, 0.0))),
+                (5, 8, 65.0, :dirichlet, UniformConductance(5.0, 2.0)),  # n_th == 1
+                (5, 10, 40.0, :neumann, UniformConductance(5.0, 2.0)),   # n_th == 2
+                (13, 8, 20.0, :neumann, AuroralConductance(MoenBrekkeEUVConductance())), # n_th > n_ph
+            )
+            cfg = IonosphereConfig(
+                ;
+                n_theta_hem = nth_hem, n_phi = np, lat_boundary_deg = lat_b,
+                low_lat_bc = bc, conductance = cond, tol = 1.0e-12, max_iter = 1000,
+            )
+            sol = IonosphereSolver(cfg; r_iono = 1.0, dipole_moment = (0.0, 0.0, -5.0))
+            jr = [1.0e-6 * sin(sol.theta[i]) * sin(sol.phi[j]) for i in 1:sol.n_theta, j in 1:sol.n_phi]
+            @test solve_ionosphere!(sol, jr)
+
+            for (op, ws) in ((sol.op_N, sol.ws_N), (sol.op_S, sol.ws_S))
+                n = length(ws.rhs)
+                u = [sin(0.37 * k) + 0.5 * cos(1.13 * k) for k in 1:n]
+                v = [cos(0.71 * k) - 0.3 * sin(0.29 * k) for k in 1:n]
+                Au = similar(u)
+                ATv = similar(v)
+                Minv_u = similar(u)
+                MinvT_v = similar(v)
+                IonosphereElectrodynamics._matvec!(Au, u, op)
+                IonosphereElectrodynamics._matvec_transpose!(ATv, v, op)
+                @test isapprox(dot(v, Au), dot(ATv, u); rtol = 1.0e-13, atol = 1.0e-13)
+
+                IonosphereElectrodynamics._apply_ilu0!(Minv_u, u, op)
+                IonosphereElectrodynamics._apply_ilu0_transpose!(MinvT_v, v, op)
+                @test isapprox(dot(v, Minv_u), dot(MinvT_v, u); rtol = 1.0e-13, atol = 1.0e-13)
+
+                # Verify 0 B steady-state allocation in transpose BiCGSTAB solve
+                copyto!(ws.rhs, v)
+                @test _alloc_bicgstab_transpose(op, ws, sol.config.tol, sol.config.max_iter) == 0
+                IonosphereElectrodynamics._matvec_transpose!(ATv, ws.x, op)
+                @test norm(ATv - v) / norm(v) < 1.0e-11
+            end
+        end
+    end
+
+    @testset "2D PDE Solver AD: ForwardDiff (Implicit JVP, Warm-Start, Jr=0, Hessians) & ChainRulesCore (rrule/frule)" begin
+        # Grid small enough for fast FD verification, large enough to exercise full wavefronts
+        nth_hem, np = 9, 16
+        base_cfg = IonosphereConfig(; n_theta_hem = nth_hem, n_phi = np, tol = 1.0e-12, max_iter = 1000)
+        base_sol = IonosphereSolver(base_cfg; r_iono = 1.017, dipole_moment = (0.0, 0.0, -5.0))
+        m1 = [1.0e-6 * sin(base_sol.theta[i])^2 * sin(base_sol.phi[j]) for i in 1:base_sol.n_theta, j in 1:base_sol.n_phi]
+        m2 = [1.0e-6 * sin(base_sol.theta[i]) * cos(2 * base_sol.phi[j]) for i in 1:base_sol.n_theta, j in 1:base_sol.n_phi]
+        w_loss = [cos(0.4 * i + 0.7 * j) for i in 1:base_sol.n_theta, j in 1:base_sol.n_phi]
+
+        # 1. ForwardDiff through solve_ionosphere w.r.t. jr_outward (including Jr == 0!)
+        for (label, bc, nsm, neut, cond) in (
+                ("Uniform Dirichlet", :dirichlet, 0, true, UniformConductance(5.0, 8.0)),
+                ("Uniform Neumann + Smooth", :neumann, 2, true, UniformConductance(5.0, 2.0)),
+                ("SolarEUV no-neut", :dirichlet, 1, false, SolarEUVConductance(; sun_dir = (1.0, 0.0, 0.0))),
+                ("Auroral tanh_sqrt", :dirichlet, 1, true, AuroralConductance(MoenBrekkeEUVConductance(); mode = :tanh_sqrt)),
+                ("Auroral saturating Neumann", :neumann, 1, true, AuroralConductance(SolarEUVConductance(); mode = :saturating)),
+            )
+            cfg = IonosphereConfig(
+                ;
+                n_theta_hem = nth_hem, n_phi = np, low_lat_bc = bc,
+                n_smooth_fac = nsm, neutralize_fac = neut, conductance = cond,
+                tol = 1.0e-12, max_iter = 1000,
+            )
+            sol = IonosphereSolver(cfg; r_iono = 1.017, dipole_moment = (0.0, 0.0, -5.0))
+            loss_p(p) = dot(w_loss, solve_ionosphere(sol, p[1] .* m1 .+ p[2] .* m2))
+            p0 = [1.2, -0.7]
+            g_fwd = ForwardDiff.gradient(loss_p, p0)
+            g_fd = _fd_grad(loss_p, p0)
+            @test isapprox(g_fwd, g_fd; rtol = 1.0e-6, atol = 1.0e-12)
+
+            # Verify ChainRulesCore rrule matches ForwardDiff on the full matrix jr -> phi!
+            jr0 = p0[1] .* m1 .+ p0[2] .* m2
+            phi_rr, pb = rrule(solve_ionosphere, sol, jr0)
+            @test phi_rr ≈ solve_ionosphere(sol, jr0)
+            _, _, bar_jr = pb(w_loss)
+            @test isapprox(dot(bar_jr, m1), g_fwd[1]; rtol = 1.0e-8)
+            @test isapprox(dot(bar_jr, m2), g_fwd[2]; rtol = 1.0e-8)
+
+            # Verify ChainRulesCore frule matches ForwardDiff & adjoint identity <w, dphi> == <bar_jr, djr>
+            djr = 0.7 .* m1 .- 0.3 .* m2
+            phi_fr, dphi_fr = frule((NoTangent(), NoTangent(), djr), solve_ionosphere, sol, jr0)
+            @test phi_fr ≈ phi_rr
+            dphi_ad = ForwardDiff.derivative(s -> solve_ionosphere(sol, jr0 .+ s .* djr), 0.0)
+            @test isapprox(dphi_fr, dphi_ad; rtol = 1.0e-8, atol = 1.0e-12)
+            @test isapprox(dot(w_loss, dphi_fr), dot(bar_jr, djr); rtol = 1.0e-8)
+
+            # ZeroTangent fast return in rrule & frule
+            @test pb(ZeroTangent()) == (NoTangent(), NoTangent(), ZeroTangent())
+            @test frule((NoTangent(), NoTangent(), ZeroTangent()), solve_ionosphere, sol, jr0)[2] === ZeroTangent()
+        end
+
+        # 2. Regression: Jr == 0 must STILL produce exact nonzero ∂Φ/∂Jr (no b_norm == 0 wipeout!)
+        sol_z = IonosphereSolver(base_cfg; r_iono = 1.017, dipole_moment = (0.0, 0.0, -5.0))
+        g_at_zero = ForwardDiff.gradient(p -> dot(w_loss, solve_ionosphere(sol_z, p[1] .* m1 .+ p[2] .* m2)), [0.0, 0.0])
+        g_at_zero_fd = _fd_grad(p -> dot(w_loss, solve_ionosphere(sol_z, p[1] .* m1 .+ p[2] .* m2)), [0.0, 0.0])
+        @test norm(g_at_zero) > 1.0e-10
+        @test isapprox(g_at_zero, g_at_zero_fd; rtol = 1.0e-7)
+
+        # 3. Regression: warm-started solve_ionosphere! must produce exact tangent even when primal converges in 0 iters
+        function warm_start_loss(p)
+            T = eltype(p)
+            sol_w = IonosphereSolver(base_cfg; r_iono = 1.017, dipole_moment = (0.0, 0.0, -5.0), FT = T)
+            jr_p = p[1] .* m1 .+ p[2] .* m2
+            # First solve seeds sol_w.phi_solved with primal solution
+            solve_ionosphere!(sol_w, m1)
+            # Second solve starts at identical primal when p == [1, 0], testing warm-start tangent convergence!
+            solve_ionosphere!(sol_w, jr_p)
+            return dot(w_loss, sol_w.phi_pot)
+        end
+        g_warm_exact = [
+            dot(w_loss, solve_ionosphere(sol_z, m1)),
+            dot(w_loss, solve_ionosphere(sol_z, m2)),
+        ]
+        @test isapprox(ForwardDiff.gradient(warm_start_loss, [1.0, 0.0]), g_warm_exact; rtol = 1.0e-10)
+
+        # 4. ForwardDiff w.r.t. conductance parameters, dipole geometry & CustomConductance time t
+        function param_loss(p)
+            cond = AuroralConductance(
+                MoenBrekkeEUVConductance(; f107 = p[1], sigma_P_night = p[2], sun_dir = (1.0, 0.0, 0.0));
+                sigma_P_max = p[3], hall_ratio = p[4], fac_scale = p[5], mode = :tanh_sqrt,
+            )
+            cfg = IonosphereConfig(
+                ;
+                n_theta_hem = nth_hem, n_phi = np,
+                conductance = cond, sigma_parallel = p[6],
+                tol = 1.0e-12, max_iter = 1000,
+            )
+            phi = solve_ionosphere(cfg, m1; r_iono = p[7], dipole_moment = (p[8], 0.0, -5.0))
+            return dot(w_loss, phi)
+        end
+        p_sys = [150.0, 2.5, 12.0, 1.4, 1.0e-6, 800.0, 1.017, 0.3]
+        @test isapprox(
+            ForwardDiff.gradient(param_loss, p_sys),
+            _fd_grad(param_loss, p_sys);
+            rtol = 1.0e-5,
+        )
+
+        # CustomConductance with time dependence t
+        cfg_t = IonosphereConfig(
+            ;
+            n_theta_hem = nth_hem, n_phi = np,
+            conductance = CustomConductance((th, ph, t) -> (4.0 + 0.5 * t + sin(th), 2.0 * cos(ph) * (1.0 + 0.2 * t))),
+            tol = 1.0e-12, max_iter = 1000,
+        )
+        sol_t = IonosphereSolver(cfg_t; r_iono = 1.0, dipole_moment = (0.0, 0.0, -5.0))
+        f_time(t) = dot(w_loss, solve_ionosphere(sol_t, m1; t = t))
+        @test isapprox(
+            ForwardDiff.derivative(f_time, 1.5),
+            (f_time(1.5 + 1.0e-6) - f_time(1.5 - 1.0e-6)) / 2.0e-6;
+            rtol = 1.0e-6,
+        )
+
+        # 5. End-to-end differentiable pipeline: jr -> solve_ionosphere -> ionosphere_field_view -> E & u_ExB
+        x_q = SVector(0.5, 0.4, 2.0)
+        b_q = dipole_B0(base_sol.frame, x_q)
+        function e_from_jr(p)
+            phi = solve_ionosphere(base_sol, p[1] .* m1 .+ p[2] .* m2)
+            vf = ionosphere_field_view(base_sol, phi)
+            return collect(eval_ionosphere_E(vf, x_q; B0 = b_q))
+        end
+        @test isapprox(
+            ForwardDiff.jacobian(e_from_jr, [1.2, -0.4]),
+            _fd_jac(e_from_jr, [1.2, -0.4]);
+            rtol = 1.0e-6,
+        )
+
+        # 6. ChainRulesCore rrule for ionosphere_field_view(solver, phi_pot)
+        phi_v0 = solve_ionosphere(base_sol, m1 .+ 0.5 .* m2)
+        w_dth = [sin(0.3 * i + 0.5 * j) for i in 1:base_sol.n_theta, j in 1:base_sol.n_phi]
+        w_dph = [cos(0.6 * i - 0.2 * j) for i in 1:base_sol.n_theta, j in 1:base_sol.n_phi]
+        w_pgN = SVector(0.7, -0.4)
+        w_pgS = SVector(-0.3, 0.9)
+        vf_rr, pb_vf = rrule(ionosphere_field_view, base_sol, phi_v0)
+        dv = Tangent{typeof(vf_rr)}(
+            ; dphi_dtheta = w_dth, dphi_dphi = w_dph, pole_grad_N = w_pgN, pole_grad_S = w_pgS,
+        )
+        _, _, bar_phi_rr = pb_vf(dv)
+        bar_phi_fd = ForwardDiff.gradient(
+            phi -> begin
+                v = ionosphere_field_view(base_sol, phi)
+                dot(w_dth, v.dphi_dtheta) + dot(w_dph, v.dphi_dphi) +
+                    dot(w_pgN, v.pole_grad_N) + dot(w_pgS, v.pole_grad_S)
+            end,
+            phi_v0,
+        )
+        @test isapprox(bar_phi_rr, bar_phi_fd; rtol = 1.0e-12, atol = 1.0e-12)
+
+        # 7. Interleaved rrule calls with dynamic AuroralConductance must not corrupt earlier pullbacks
+        cfg_dyn = IonosphereConfig(
+            ;
+            n_theta_hem = nth_hem, n_phi = np,
+            conductance = AuroralConductance(MoenBrekkeEUVConductance(); mode = :tanh_sqrt),
+            sigma_parallel = 1000.0, n_smooth_fac = 1, tol = 1.0e-12, max_iter = 1000,
+        )
+        sol_dyn = IonosphereSolver(cfg_dyn; r_iono = 1.017, dipole_moment = (0.0, 0.0, -5.0))
+        jr_1 = 1.1 .* m1 .+ 0.3 .* m2
+        jr_2 = 2.5 .* m1 .- 0.8 .* m2
+        _, pb1 = rrule(solve_ionosphere, sol_dyn, jr_1)
+        _, pb2 = rrule(solve_ionosphere, sol_dyn, jr_2)
+        _, _, g1_rr = pb1(w_loss)
+        _, _, g2_rr = pb2(w_loss)
+        g1_fd = ForwardDiff.derivative(s -> dot(w_loss, solve_ionosphere(sol_dyn, jr_1 .+ s .* m1)), 0.0)
+        g2_fd = ForwardDiff.derivative(s -> dot(w_loss, solve_ionosphere(sol_dyn, jr_2 .+ s .* m2)), 0.0)
+        @test isapprox(dot(g1_rr, m1), g1_fd; rtol = 1.0e-8)
+        @test isapprox(dot(g2_rr, m2), g2_fd; rtol = 1.0e-8)
+
+        # 8. Second derivatives (ForwardDiff.hessian) through the 2D PDE solver (nested Dual!)
+        function hess_loss(p)
+            cond = AuroralConductance(
+                UniformConductance(p[1], 2.0);
+                sigma_P_max = p[2], fac_scale = 1.0e-6, mode = :saturating,
+            )
+            cfg = IonosphereConfig(; n_theta_hem = 7, n_phi = 12, conductance = cond, tol = 1.0e-12)
+            sol_h = IonosphereSolver(cfg; r_iono = 1.0, dipole_moment = (0.0, 0.0, -5.0))
+            jr_h = [1.0e-6 * sin(sol_h.theta[i]) * sin(sol_h.phi[j]) for i in 1:sol_h.n_theta, j in 1:sol_h.n_phi]
+            phi = solve_ionosphere(sol_h, jr_h)
+            return sum(abs2, phi)
+        end
+        p_h = [5.0, 10.0]
+        H_ad = ForwardDiff.hessian(hess_loss, p_h)
+        H_fd = _fd_jac(p -> ForwardDiff.gradient(hess_loss, p), p_h; h = 1.0e-5)
+        @test isapprox(H_ad, H_fd; rtol = 1.0e-5)
+
+        # 9. Float32 ForwardDiff & ChainRulesCore rrule
+        cfg32_ad = IonosphereConfig(; n_theta_hem = 7, n_phi = 12, tol = 1.0f-5, FT = Float32)
+        sol32_ad = IonosphereSolver(cfg32_ad; r_iono = 1.0f0, dipole_moment = (0.0f0, 0.0f0, -5.0f0))
+        jr32_ad = [1.0f-3 * sin(sol32_ad.theta[i]) * sin(sol32_ad.phi[j]) for i in 1:sol32_ad.n_theta, j in 1:sol32_ad.n_phi]
+        w32 = [Float32(cos(0.4 * i + 0.7 * j)) for i in 1:sol32_ad.n_theta, j in 1:sol32_ad.n_phi]
+        g32_fwd = ForwardDiff.derivative(s -> dot(w32, solve_ionosphere(sol32_ad, s .* jr32_ad)), 1.0f0)
+        _, pb32 = rrule(solve_ionosphere, sol32_ad, jr32_ad)
+        _, _, bar32 = pb32(w32)
+        @test g32_fwd isa Float32
+        @test bar32 isa Matrix{Float32}
+        @test isapprox(dot(bar32, jr32_ad), g32_fwd; rtol = 1.0f-4)
     end
 end

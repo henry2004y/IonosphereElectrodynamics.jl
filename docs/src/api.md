@@ -37,6 +37,7 @@ dipole_fac_sample_point
 IonosphereConfig
 IonosphereSolver
 solve_ionosphere!
+solve_ionosphere
 reset_ionosphere!
 cross_polar_cap_potential
 write_ionosphere_diagnostics

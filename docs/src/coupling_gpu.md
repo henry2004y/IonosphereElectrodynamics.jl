@@ -79,6 +79,48 @@ println("e32   = ", round.(e32; sigdigits = 4), " (", typeof(e32), ")")
 println("u32   = ", round.(u32; sigdigits = 4), " (", typeof(u32), ")")
 ````
 
+## Generic Types & Automatic Differentiation
+
+All structs and operations in `IonosphereElectrodynamics.jl` are parameterized over generic
+`Real` scalar types (`Float64`, `Float32`, `Float16`, `BigFloat`, `ForwardDiff.Dual`, nested
+`Dual`, etc.), infer element types automatically from inputs (defaulting to `Float64` when
+unspecified), and accept `SVector{3}`, `AbstractVector`, or `NTuple{3}` for 3D vectors.
+
+- **Forward-mode AD (`ForwardDiff.jl`)**: Pointwise conductance, dipole mapping, and 3D field
+  evaluations differentiate natively with respect to coordinates, magnetic fields, and model
+  parameters. Loading `ForwardDiff` activates a package extension that differentiates the 2D
+  spherical PDE solve implicitly ($A\dot{x} = \dot{b} - \dot{A}x$), reusing a single SIMD
+  primal `ILU(0)` factorization per hemisphere and supporting warm-starts, $J_r = 0$, and
+  nested `Dual` Hessians.
+- **Reverse-mode AD (`ChainRulesCore.jl`)**: Loading `ChainRulesCore` (directly or via
+  `Zygote.jl`, `Mooncake.jl`, or `ReverseDiff.jl`) activates exact $O(1)$ implicit adjoint
+  rules (`rrule` and `frule`) for the stateless [`solve_ionosphere`](@ref) and
+  [`ionosphere_field_view`](@ref)`(solver, phi_pot)` pipeline using the exact 5-point
+  transpose operator $A^\mathsf{T}\lambda = \bar{\Phi}$ and transpose `ILU(0)` preconditioner
+  in `0 B` steady-state allocations.
+
+```julia
+using ForwardDiff
+using IonosphereElectrodynamics
+using StaticArrays
+
+# Differentiate CPCP or mapped 3D E-field w.r.t. conductance parameters or FACs
+cfg = IonosphereConfig(; n_theta_hem = 17, n_phi = 32)
+sol = IonosphereSolver(cfg; r_iono = 1.017, dipole_moment = (0.0, 0.0, -5.0))
+jr0 = [1.0e-6 * sin(sol.theta[i])^2 * sin(sol.phi[j]) for i in 1:sol.n_theta, j in 1:sol.n_phi]
+x = SVector(0.5, 0.4, 2.0)
+b0 = dipole_B0(sol.frame, x)
+
+# Spatial Jacobian ∂E/∂x
+J_x = ForwardDiff.jacobian(pos -> collect(eval_ionosphere_E(sol, pos; B0 = b0)), collect(x))
+
+# Parameter sensitivity through the 2D spherical PDE solve
+dE_ds = ForwardDiff.derivative(1.0) do scale
+    phi = solve_ionosphere(sol, scale .* jr0)
+    eval_ionosphere_E(ionosphere_field_view(sol, phi), x; B0 = b0)
+end
+```
+
 ## Analytic R1 + R2 Polar Benchmark
 
 The standalone script [`examples/fleks_analytic_polar.jl`](https://github.com/henry2004y/IonosphereElectrodynamics.jl/blob/main/examples/fleks_analytic_polar.jl)
