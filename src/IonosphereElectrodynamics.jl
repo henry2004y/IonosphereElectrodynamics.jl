@@ -15,9 +15,11 @@ using MuladdMacro: @muladd
 using PrecompileTools: @compile_workload, @setup_workload
 using StaticArrays: SMatrix, SVector
 
+include("utils.jl")
 include("conductance.jl")
 include("dipole.jl")
 include("solver.jl")
+include("adjoint.jl")
 include("mapping.jl")
 
 export AbstractConductanceModel,
@@ -38,6 +40,7 @@ export AbstractConductanceModel,
     IonosphereConfig,
     IonosphereSolver,
     solve_ionosphere!,
+    solve_ionosphere,
     reset_ionosphere!,
     cross_polar_cap_potential,
     write_ionosphere_diagnostics,
@@ -58,11 +61,13 @@ export AbstractConductanceModel,
         sol = IonosphereSolver(cfg; r_iono = 1.0, dipole_moment = (0.0, 0.0, -1.0))
         jr = [sin(sol.theta[i]) * sin(sol.phi[j]) for i in 1:sol.n_theta, j in 1:sol.n_phi]
         _ = solve_ionosphere!(sol, jr)
+        phi = solve_ionosphere(sol, jr)
         _ = cross_polar_cap_potential(sol)
+        vf = ionosphere_field_view(sol, phi)
         x = SVector(0.0, 0.2, 2.0)
         b0 = dipole_B0(sol.frame, x)
-        _ = eval_ionosphere_E(sol, x; B0 = b0)
-        _ = eval_ionosphere_u_exb(sol, x, b0)
+        _ = eval_ionosphere_E(vf, x; B0 = b0)
+        _ = eval_ionosphere_u_exb(vf, x, b0)
         _ = electron_mobility_tensor(1.0, 0.5, SVector(0.0, 0.0, 1.0))
     end
 end
