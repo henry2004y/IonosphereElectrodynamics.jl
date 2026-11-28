@@ -49,7 +49,7 @@ jobs:
       JULIA_NUM_THREADS: auto
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Setup Julia
         uses: julia-actions/setup-julia@v3
         with:
@@ -58,7 +58,7 @@ jobs:
         id: julia-cache
         uses: julia-actions/cache@v3
       - name: Cache Node dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: docs/node_modules
           key: ${{ runner.os }}-docs-node-modules-${{ hashFiles('docs/package.json') }}
@@ -75,7 +75,7 @@ jobs:
       - name: Save Julia depot cache on cancel or failure
         id: julia-cache-save
         if: cancelled() || failure()
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: |
             ${{ steps.julia-cache.outputs.cache-paths }}
